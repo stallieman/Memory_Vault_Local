@@ -50,17 +50,10 @@ IDK = "I don't know based on the provided context."
 # Regex pattern for valid citations: [chunk:abc123_0001] or [chunk:def-456:0002]
 CITATION_PATTERN = re.compile(r"\[chunk:([A-Za-z0-9_:-]+)\]")
 
-# Forbidden words that indicate hallucinated external sources
-FORBIDDEN_SOURCE_WORDS = {
-    "chapter", "page", "pages", "isbn", "edition", "publisher",
-    "baeldung", "stackoverflow", "medium.com", "dev.to", "wikipedia",
-    "geeksforgeeks", "tutorialspoint", "w3schools",
-    "kleppmann", "martin fowler", "uncle bob", "robert martin",
-    "et al", "proceedings", "journal", "arxiv",
-}
-
-FORBIDDEN_PATTERN = re.compile(
-    r'\b(' + '|'.join(re.escape(w) for w in FORBIDDEN_SOURCE_WORDS) + r')\b',
+# Pattern to detect unsupported source references (URL patterns only)
+# We no longer ban generic words like "page", "chapter", "section"
+UNSUPPORTED_URL_PATTERN = re.compile(
+    r'\b(https?://|www\.)\S+',
     re.IGNORECASE
 )
 
@@ -139,46 +132,67 @@ class CitationValidationError(ValueError):
 # ============================================================================
 def print_debug_bundle(debug_payload: dict) -> None:
     """Print complete debug information before raising exception."""
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("🚨 CITATION VALIDATION FAILURE - DEBUG BUNDLE")
-    print("=" * 70)
+    print("=" * 80)
     
     print(f"\n📦 Model: {debug_payload.get('model', 'unknown')}")
     
-    print(f"\n📋 Allowed Chunk IDs ({len(debug_payload.get('allowed_ids', []))}):")
-    for cid in sorted(debug_payload.get('allowed_ids', [])):
-        print(f"    - {cid}")
+    allowed = debug_payload.get('allowed_ids', [])
+    print(f"\n📋 Allowed Chunk IDs ({len(allowed)}):")
+    if len(allowed) <= 10:
+        for cid in sorted(allowed):
+            print(f"    ✓ {cid}")
+    else:
+        for cid in sorted(allowed)[:10]:
+            print(f"    ✓ {cid}")
+        print(f"    ... and {len(allowed) - 10} more")
     
-    print(f"\n📤 User Prompt Sent:")
-    print("-" * 70)
+    print(f"\n📤 User Prompt (truncated):")
+    print("-" * 80)
     user_prompt = debug_payload.get('user_prompt', '')
-    # Truncate if very long
-    if len(user_prompt) > 3000:
-        print(user_prompt[:3000])
+    if len(user_prompt) > 1500:
+        print(user_prompt[:1500])
         print(f"\n... [truncated, {len(user_prompt)} chars total]")
     else:
         print(user_prompt)
-    print("-" * 70)
+    print("-" * 80)
     
-    print(f"\n📥 Raw Model Output:")
-    print("-" * 70)
-    print(debug_payload.get('model_output', ''))
-    print("-" * 70)
+    print(f"\n📥 Raw Model Output (first 5000 chars):")
+    print("-" * 80)
+    output = debug_payload.get('model_output', '')
+    print(output if len(output) <= 5000 else output[:5000] + "\n... [truncated]")
+    print("-" * 80)
     
-    print(f"\n❌ Failure Reason: {debug_payload.get('reason', 'unknown')}")
+    print(f"\n❌ Failure Reason:")
+    print(f"   {debug_payload.get('reason', 'unknown')}")
     
-    if debug_payload.get('found_citations'):
-        print(f"\n🔍 Citations Found: {debug_payload.get('found_citations')}")
-    if debug_payload.get('invalid_citations'):
-        print(f"🚫 Invalid Citations: {debug_payload.get('invalid_citations')}")
-    if debug_payload.get('forbidden_words_found'):
-        print(f"⚠️  Forbidden Words Found: {debug_payload.get('forbidden_words_found')}")
+    # Show found vs invalid citations
+    found = debug_payload.get('found_citations', [])
+    invalid = debug_payload.get('invalid_citations', [])
     
-    print("\n" + "=" * 70)
+    if found:
+        print(f"\n🔍 Citations Found ({len(found)}):")
+        for cid in sorted(found) if isinstance(found, (set, list)) else [found]:
+            print(f"    - {cid}")
+    
+    if invalid:
+        print(f"\n🚫 Invalid Citations ({len(invalid)}):")
+        for cid in sorted(invalid):
+            print(f"    ✗ {cid} (NOT IN ALLOWED SET)")
+    
+    if debug_payload.get('urls_found'):
+        print(f"\n🌐 External URLs Found: {debug_payload.get('urls_found')}")
+    
+    if 'quotes_found' in debug_payload:
+        qcount = debug_payload['quotes_found']
+        print(f"\n💬 Quotes Found: {qcount}")
+    
+    print("\n" + "=" * 80)
 
 
 # ============================================================================
-# STRICT Citation Validation (Fail-Fast) with Quote Requirement
+# STRICT Citation Validation (Fail-Fast) - FIXED VERSION
 # ============================================================================
 
 # Pattern for quoted text (various quote styles)
@@ -192,16 +206,18 @@ def validate_answer(
     require_quotes: bool = True
 ) -> Set[str]:
     """
-    Validate that an answer contains proper citations AND quotes.
+    Validate that an answer contains proper citations.
     
     FAIL-FAST: Raises CitationValidationError if validation fails.
     
-    Rules:
-    1. IDK response is always valid
+    Validation Rules:
+    1. IDK response is always valid (no citations required)
     2. Must contain at least one valid [chunk:id] citation
-    3. All cited IDs must be from allowed_ids
-    4. Must NOT contain forbidden source words
-    5. Must contain at least one verbatim quote from sources (if require_quotes=True)
+    3. All cited IDs must be from allowed_ids (no hallucinated chunks)
+    4. Must NOT contain external URLs (http/https links)
+    5. Optionally require verbatim quotes (if require_quotes=True)
+    
+    REMOVED: Generic word banning ("page", "chapter", etc.) - too restrictive
     
     Args:
         text: The model's response text
@@ -227,48 +243,49 @@ def validate_answer(
     # FAIL: No citations found
     if not found_citations:
         debug_payload['reason'] = "No citations found - answer must use [chunk:id] format"
-        debug_payload['model_output'] = text
+        debug_payload['model_output'] = text[:5000]  # Truncate
         debug_payload['found_citations'] = set()
         print_debug_bundle(debug_payload)
         raise CitationValidationError("No citations found", debug_payload)
     
-    # FAIL: Unknown citation IDs
+    # FAIL: Unknown citation IDs (hallucinated chunks)
     invalid_citations = found_citations - allowed_ids
     if invalid_citations:
-        debug_payload['reason'] = f"Unknown citation ids: {invalid_citations}"
-        debug_payload['model_output'] = text
-        debug_payload['found_citations'] = found_citations
-        debug_payload['invalid_citations'] = invalid_citations
+        debug_payload['reason'] = f"Invalid chunk IDs - not in allowed set: {invalid_citations}"
+        debug_payload['model_output'] = text[:5000]
+        debug_payload['found_citations'] = list(found_citations)
+        debug_payload['invalid_citations'] = list(invalid_citations)
         print_debug_bundle(debug_payload)
         raise CitationValidationError(
-            f"Unknown citation ids: {invalid_citations}", 
+            f"Invalid chunk IDs: {invalid_citations}", 
             debug_payload
         )
     
-    # FAIL: Forbidden words detected (hallucination indicator)
-    forbidden_matches = FORBIDDEN_PATTERN.findall(text.lower())
-    if forbidden_matches:
-        unique_forbidden = set(forbidden_matches)
-        debug_payload['reason'] = f"Forbidden source words found (possible hallucination): {unique_forbidden}"
-        debug_payload['model_output'] = text
-        debug_payload['found_citations'] = found_citations
-        debug_payload['forbidden_words_found'] = unique_forbidden
+    # FAIL: External URLs detected (hallucination indicator)
+    url_matches = UNSUPPORTED_URL_PATTERN.findall(text)
+    if url_matches:
+        unique_urls = set(url_matches)
+        debug_payload['reason'] = f"External URLs not allowed - answer must cite local chunks only: {unique_urls}"
+        debug_payload['model_output'] = text[:5000]
+        debug_payload['found_citations'] = list(found_citations)
+        debug_payload['urls_found'] = list(unique_urls)
         print_debug_bundle(debug_payload)
-        raise CitationValidationError(f"Forbidden source words: {unique_forbidden}", debug_payload)
+        raise CitationValidationError(f"External URLs found: {unique_urls}", debug_payload)
     
     # FAIL: No quotes found (evidence requirement)
     if require_quotes:
         quotes_found = QUOTE_PATTERN.findall(text)
         if not quotes_found:
             debug_payload['reason'] = "No verbatim quotes found - answer must include quoted evidence from sources"
-            debug_payload['model_output'] = text
-            debug_payload['found_citations'] = found_citations
-            debug_payload['quotes_found'] = []
+            debug_payload['model_output'] = text[:5000]
+            debug_payload['found_citations'] = list(found_citations)
+            debug_payload['quotes_found'] = 0
             print_debug_bundle(debug_payload)
             raise CitationValidationError("No quotes found - evidence required", debug_payload)
-        debug_payload['quotes_found'] = quotes_found
+        debug_payload['quotes_found'] = len(quotes_found)  # Just count, not full quotes
     
     # SUCCESS: All validations passed
+    print(f"✅ Citation validation passed: {len(found_citations)} citations, {len(set(found_citations))} unique chunks")
     return found_citations
 
 
