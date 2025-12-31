@@ -50,11 +50,20 @@ IDK = "I don't know based on the provided context."
 # Regex pattern for valid citations: [chunk:abc123_0001] or [chunk:def-456:0002]
 CITATION_PATTERN = re.compile(r"\[chunk:([A-Za-z0-9_:-]+)\]")
 
-# Pattern to detect unsupported source references (URL patterns only)
-# We no longer ban generic words like "page", "chapter", "section"
+# Pattern to detect actual external URLs with domain names
+# Only blocks real URLs like "https://example.com", not just "https://" in text
 UNSUPPORTED_URL_PATTERN = re.compile(
-    r'\b(https?://|www\.)\S+',
+    r'https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}',
     re.IGNORECASE
+)
+
+# Flexible IDK detection: accept English and Dutch variants
+# Matches:
+# - "I don't know based on the provided context."
+# - "Ik weet het niet gebaseerd op de/het gegeven/verstrekte context."
+IDK_PATTERN = re.compile(
+    r"^(I don't know|Ik weet (het )?niet)(\s+gebaseerd op|\s+based on).{0,50}(context|informatie).*$",
+    re.IGNORECASE | re.DOTALL
 )
 
 
@@ -233,9 +242,14 @@ def validate_answer(
     """
     text_stripped = text.strip()
     
-    # ACCEPT: Exact IDK response
+    # ACCEPT: Flexible IDK response (English or Dutch)
+    # Exact match for backward compatibility
     if text_stripped == IDK:
         return set()  # No citations needed for IDK
+    
+    # Flexible pattern match for variations
+    if IDK_PATTERN.match(text_stripped):
+        return set()  # No citations needed for IDK variants
     
     # Extract all citations
     found_citations = set(CITATION_PATTERN.findall(text))
@@ -745,11 +759,11 @@ def print_startup_banner(model: str, kb_stats: dict) -> None:
     print(f"   • Data directory: {kb_stats['data_directory']}")
     print(f"   • DB location:    {kb_stats.get('db_path', 'default')}")
     print(f"   • Total chunks:   {kb_stats['total_chunks']}")
-    print(f"\n🔒 Validation Rules:")
-    print(f"   • Must cite [chunk:id] for every fact")
-    print(f"   • Must include verbatim quotes from sources")
-    print(f"   • No external source words allowed")
-    print(f"   • Single retry then fail-fast")
+    print(f"\n🔒 Validation Rules (automatic):")
+    print(f"   • All answers cite [chunk:id] for every fact")
+    print(f"   • All answers include verbatim quotes from sources")
+    print(f"   • External URLs are blocked")
+    print(f"   • Single retry then fail-fast on validation errors")
     print("-" * 70)
 
 

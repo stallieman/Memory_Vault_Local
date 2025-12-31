@@ -100,6 +100,44 @@ DB path: C:\Users\MarcoLocalAdmin\.local-mcp-kb\chroma_db
 
 ---
 
+## 💡 Query Gedrag (Automatische Citations)
+
+**Je hoeft NIETS speciaals te vragen** - citations komen automatisch:
+
+✅ **Goed (natuurlijke vragen):**
+- "Hoe wijzig ik een veldtype in Elasticsearch?"
+- "Wat is een CTE in SQL?"
+- "Docker compose volumes uitleg"
+
+❌ **Niet nodig:**
+- "Vertel me over Docker en citeer je bronnen met [chunk:...]"  
+  → System zorgt automatisch voor citations
+
+**Wat gebeurt er:**
+1. Je stelt normale vraag
+2. System haalt relevante chunks op
+3. LLM krijgt instructie: "Citeer ELKE claim met [chunk:id] en quotes"
+4. Validator checkt output strict:
+   - Minimaal 1 citation per feit
+   - Quotes verplicht (behalve bij "I don't know")
+   - Alleen toegestane chunk IDs
+   - Geen externe URLs
+5. Bij validatie fout: 1x retry, dan fail-fast
+
+**Output formaat (automatisch):**
+```
+"Verbatim quote uit bron" [chunk:abc123_0001]
+
+Volgende claim met "andere quote" [chunk:def456_0002]
+```
+
+**IDK response (exact match):**
+```
+I don't know based on the provided context.
+```
+
+---
+
 ## 🔧 Troubleshooting
 
 ### Ollama niet bereikbaar

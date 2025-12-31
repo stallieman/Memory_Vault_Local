@@ -88,9 +88,17 @@ def main():
     # TEST 5: External URL (should FAIL)
     test_results.append(test_case(
         name="External URL detected",
-        text='"See https://stackoverflow.com for more info" [chunk:abc123_0001]',
+        text='"See https://stackoverflow.com/questions/123 for more info" [chunk:abc123_0001]',
         allowed_ids={'abc123_0001'},
         should_pass=False
+    ))
+    
+    # TEST 5b: "https://" in text without full URL (should PASS)
+    test_results.append(test_case(
+        name="https:// mentioned in explanation (not a real URL)",
+        text='"Configure the endpoint using https:// protocol" [chunk:abc123_0001]',
+        allowed_ids={'abc123_0001'},
+        should_pass=True
     ))
     
     # TEST 6: Valid answer with section reference
@@ -110,7 +118,16 @@ def main():
         require_quotes=False
     ))
     
-    # TEST 8: No quotes (should FAIL when require_quotes=True)
+    # TEST 8: IDK response (Dutch variant)
+    test_results.append(test_case(
+        name="IDK response (Dutch variant)",
+        text='Ik weet het niet gebaseerd op het gegeven context.',
+        allowed_ids={'abc123_0001'},
+        should_pass=True,
+        require_quotes=False
+    ))
+    
+    # TEST 9: No quotes (should FAIL when require_quotes=True)
     test_results.append(test_case(
         name="No quotes (evidence missing)",
         text='The answer is here [chunk:abc123_0001]',  # No quotes
@@ -119,7 +136,7 @@ def main():
         require_quotes=True
     ))
     
-    # TEST 9: Multiple valid citations
+    # TEST 10: Multiple valid citations
     test_results.append(test_case(
         name="Multiple valid citations",
         text='"First point" [chunk:doc1_001] and "second point" [chunk:doc2_002]',
@@ -127,7 +144,7 @@ def main():
         should_pass=True
     ))
     
-    # TEST 10: Mixed valid and invalid IDs (should FAIL)
+    # TEST 11: Mixed valid and invalid IDs (should FAIL)
     test_results.append(test_case(
         name="Mixed valid and invalid chunk IDs",
         text='"Valid source" [chunk:doc1_001] and "fake source" [chunk:hallucinated_999]',

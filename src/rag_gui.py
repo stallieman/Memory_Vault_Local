@@ -228,7 +228,7 @@ class RAGApp(ctk.CTk):
         
         self.hint_label = ctk.CTkLabel(
             self.input_frame,
-            text="Press Ctrl+Enter to submit • All answers require [chunk:id] citations",
+            text="Press Ctrl+Enter to submit",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
