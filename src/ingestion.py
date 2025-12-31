@@ -351,6 +351,29 @@ class DocumentIngestion:
             print(f"✗ Error querying: {e}")
             return {"results": None, "count": 0}
     
+    def get_chunks_by_ids(self, chunk_ids: List[str]) -> Dict[str, Dict]:
+        """
+        Retrieve multiple chunks by their IDs.
+        Returns a dict mapping chunk_id -> {"text": ..., "metadata": ...}
+        """
+        if not chunk_ids:
+            return {}
+        try:
+            res = self.collection.get(
+                ids=chunk_ids,
+                include=["documents", "metadatas"]
+            )
+            result = {}
+            for i, cid in enumerate(res.get("ids", [])):
+                result[cid] = {
+                    "text": (res.get("documents") or [])[i] if res.get("documents") else "",
+                    "metadata": (res.get("metadatas") or [])[i] if res.get("metadatas") else {}
+                }
+            return result
+        except Exception as e:
+            print(f"✗ Error getting chunks by ids: {e}")
+            return {}
+    
     def get_stats(self) -> Dict:
         """Get database statistics."""
         return {

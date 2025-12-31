@@ -1,24 +1,41 @@
 """
-Local RAG with Ollama + ChromaDB Knowledge Base
-Interactive Q&A using local Ollama LLM with C:\\Notes as knowledge base.
+Grounded Local RAG with Ollama + ChromaDB Knowledge Base
+Citation-enforced Q&A using local Ollama LLM with C:\\Notes as knowledge base.
+
+Features:
+- Strict grounding: answers only from provided context
+- Citation validation: [chunk:<id>] format required
+- Retry logic: re-asks with stricter prompt on citation failure
+- No hallucinated sources allowed
 """
 
 import os
+import re
 import sys
 import requests
 from pathlib import Path
+from typing import List, Dict, Tuple, Optional, Set
 from ingestion import DocumentIngestion
 
+# ============================================================================
 # Configuration via environment variables
+# ============================================================================
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "mistral-nemo:12b-instruct-2407-q4_K_M")
-TOP_K = int(os.environ.get("RAG_TOP_K", "4"))
-TOP_K_FULL = int(os.environ.get("RAG_TOP_K_FULL", "2"))
-SNIPPET_CHARS = int(os.environ.get("RAG_SNIPPET_CHARS", "400"))
-MAX_CHARS_FULL = int(os.environ.get("RAG_MAX_CHARS_FULL", "4500"))
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "rag-grounded-nemo")
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "4"))
+RAG_TOP_K_FULL = int(os.environ.get("RAG_TOP_K_FULL", "2"))
+RAG_MAX_CHARS_FULL = int(os.environ.get("RAG_MAX_CHARS_FULL", "4500"))
+RAG_SNIPPET_CHARS = int(os.environ.get("RAG_SNIPPET_CHARS", "400"))
+RAG_NUM_CTX = int(os.environ.get("RAG_NUM_CTX", "8192"))
+
+# The exact "I don't know" response
+IDK_RESPONSE = "I don't know based on the provided context."
 
 
-def check_ollama_connection() -> tuple[bool, list[str]]:
+# ============================================================================
+# Ollama connectivity checks
+# ============================================================================
+def check_ollama_connection() -> Tuple[bool, List[str]]:
     """
     Check if Ollama is running and get available models.
     Returns (is_connected, list_of_model_names).
@@ -38,11 +55,10 @@ def check_ollama_connection() -> tuple[bool, list[str]]:
         return False, []
 
 
-def get_effective_model(available_models: list[str]) -> str:
+def get_effective_model(available_models: List[str]) -> str:
     """
     Get the effective model to use.
-    If OLLAMA_MODEL is in available_models, use it.
-    Otherwise, suggest available models.
+    Checks for exact match, then partial match, then falls back.
     """
     if OLLAMA_MODEL in available_models:
         return OLLAMA_MODEL
@@ -58,25 +74,35 @@ def get_effective_model(available_models: list[str]) -> str:
     # No matching model found
     print(f"⚠ Model '{OLLAMA_MODEL}' not found in Ollama.")
     if available_models:
-        print(f"  Available models: {', '.join(available_models)}")
+        print(f"  Available models: {', '.join(available_models[:5])}")
+        # Prefer a grounded model if available
+        for m in available_models:
+            if "grounded" in m.lower():
+                print(f"  Using: '{m}'")
+                return m
         print(f"  Using first available: '{available_models[0]}'")
         return available_models[0]
     
-    # No models available at all
     print("✗ No models found in Ollama. Please pull a model first:")
-    print(f"  ollama pull {OLLAMA_MODEL}")
-    return OLLAMA_MODEL  # Will fail at chat time
+    print(f"  ollama pull mistral-nemo:12b-instruct-2407-q4_K_M")
+    print(f"  ollama create rag-grounded-nemo -f ollama/Modelfile.rag-grounded")
+    return OLLAMA_MODEL
 
 
-def retrieve_context(kb: DocumentIngestion, question: str) -> list[dict]:
+# ============================================================================
+# Context building
+# ============================================================================
+def retrieve_context(kb: DocumentIngestion, question: str) -> Tuple[List[Dict], Set[str]]:
     """
     Retrieve relevant context chunks from the knowledge base.
-    Returns a list of dicts with text, metadata, id, and score.
+    Returns (list_of_chunks, set_of_allowed_chunk_ids).
+    
+    Each chunk dict contains: text, metadata, id, score
     """
-    result = kb.query(question, n_results=TOP_K)
+    result = kb.query(question, n_results=RAG_TOP_K)
     
     if not result["results"] or not result["results"]["ids"][0]:
-        return []
+        return [], set()
     
     documents = result["results"]["documents"][0]
     metadatas = result["results"]["metadatas"][0]
@@ -84,49 +110,104 @@ def retrieve_context(kb: DocumentIngestion, question: str) -> list[dict]:
     ids = result["results"]["ids"][0]
 
     context_chunks = []
-    for i, (doc, meta, dist, doc_id) in enumerate(zip(documents, metadatas, distances, ids)):
-        if i >= TOP_K_FULL:
-            break
-            
-        text = doc.strip()
-        if len(text) > MAX_CHARS_FULL:
-            text = text[:MAX_CHARS_FULL].rstrip() + "..."
+    allowed_ids = set()
+    
+    for i, (doc, meta, dist, chunk_id) in enumerate(zip(documents, metadatas, distances, ids)):
+        allowed_ids.add(chunk_id)
+        
+        # Only include full text for top RAG_TOP_K_FULL chunks
+        if i < RAG_TOP_K_FULL:
+            text = doc.strip()
+            if len(text) > RAG_MAX_CHARS_FULL:
+                text = text[:RAG_MAX_CHARS_FULL].rstrip() + "..."
+        else:
+            # Snippet only for remaining chunks
+            text = doc.strip()
+            if len(text) > RAG_SNIPPET_CHARS:
+                text = text[:RAG_SNIPPET_CHARS].rstrip() + "..."
         
         context_chunks.append({
             "text": text,
             "metadata": meta,
-            "id": doc_id,
+            "id": chunk_id,
             "score": 1 - float(dist)
         })
     
-    return context_chunks
+    return context_chunks, allowed_ids
 
 
-def ask_ollama(question: str, context_chunks: list[dict], model: str) -> str:
+def build_context_payload(context_chunks: List[Dict]) -> str:
     """
-    Send a question with context to Ollama and get the response.
+    Build the CONTEXT text with explicit chunk labels.
+    Format: [chunk:<id>] source=<filename>
     """
-    system_prompt = """You are a helpful assistant that answers questions using ONLY the provided context.
-If the answer is not in the context, say you don't know.
-Always answer concisely and in Dutch."""
-
-    # Build context text with source citations
-    context_parts = []
+    parts = []
     for chunk in context_chunks:
         meta = chunk["metadata"]
-        header = f"[Source: {meta.get('relative_path', meta.get('filename', 'unknown'))}]"
-        context_parts.append(header + "\n\n" + chunk["text"])
+        source = meta.get("relative_path", meta.get("filename", "unknown"))
+        chunk_id = chunk["id"]
+        
+        header = f"[chunk:{chunk_id}] source={source}"
+        parts.append(f"{header}\n{chunk['text']}")
     
-    context_text = "\n\n---\n\n".join(context_parts)
+    return "\n\n---\n\n".join(parts)
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"""Context:
-{context_text}
 
-Question: {question}"""}
-    ]
+# ============================================================================
+# Citation validation
+# ============================================================================
+def extract_citations(text: str) -> Set[str]:
+    """
+    Extract all [chunk:<id>] citations from the model output.
+    Returns set of chunk IDs found.
+    """
+    pattern = r'\[chunk:([^\]]+)\]'
+    matches = re.findall(pattern, text)
+    return set(matches)
 
+
+def validate_citations(
+    answer: str, 
+    allowed_ids: Set[str]
+) -> Tuple[bool, str, Set[str], Set[str]]:
+    """
+    Validate that the answer contains proper citations.
+    
+    Returns: (is_valid, reason, found_citations, invalid_citations)
+    """
+    answer_stripped = answer.strip()
+    
+    # Check for exact IDK response
+    if answer_stripped == IDK_RESPONSE:
+        return True, "IDK response accepted", set(), set()
+    
+    # Extract citations
+    found_citations = extract_citations(answer)
+    
+    # Check for at least one citation
+    if not found_citations:
+        return False, "No citations found in answer", set(), set()
+    
+    # Check all citations are valid
+    invalid_citations = found_citations - allowed_ids
+    if invalid_citations:
+        return False, f"Invalid chunk IDs cited: {invalid_citations}", found_citations, invalid_citations
+    
+    return True, "Valid citations", found_citations, set()
+
+
+# ============================================================================
+# Ollama chat
+# ============================================================================
+def call_ollama(
+    model: str,
+    messages: List[Dict[str, str]],
+    temperature: float = 0.1
+) -> Tuple[str, Optional[str]]:
+    """
+    Call Ollama /api/chat endpoint.
+    Returns (response_text, error_message).
+    """
     try:
         resp = requests.post(
             f"{OLLAMA_BASE_URL}/api/chat",
@@ -134,44 +215,135 @@ Question: {question}"""}
                 "model": model,
                 "stream": False,
                 "messages": messages,
-                "options": {"temperature": 0.1, "num_ctx": 8192}
+                "options": {
+                    "temperature": temperature,
+                    "num_ctx": RAG_NUM_CTX
+                }
             },
             timeout=300
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["message"]["content"]
+        return data["message"]["content"], None
     except requests.exceptions.ConnectionError:
-        return "Error: Cannot connect to Ollama. Is it running?"
+        return "", "Cannot connect to Ollama. Is it running?"
     except requests.exceptions.Timeout:
-        return "Error: Ollama request timed out."
+        return "", "Ollama request timed out."
     except Exception as e:
-        return f"Error calling Ollama: {str(e)}"
+        return "", f"Ollama error: {str(e)}"
 
 
+def ask_with_validation(
+    question: str,
+    context_chunks: List[Dict],
+    allowed_ids: Set[str],
+    model: str
+) -> Tuple[str, bool, Set[str]]:
+    """
+    Ask the question with context and validate citations.
+    Retries once with stricter prompt if validation fails.
+    
+    Returns: (answer, is_valid, used_citations)
+    """
+    context_text = build_context_payload(context_chunks)
+    allowed_ids_str = ", ".join(sorted(allowed_ids))
+    
+    # Initial user message
+    user_message = f"""CONTEXT:
+{context_text}
+
+ALLOWED CHUNK IDS: {allowed_ids_str}
+
+QUESTION: {question}"""
+
+    messages = [
+        {"role": "user", "content": user_message}
+    ]
+    
+    # First attempt
+    answer, error = call_ollama(model, messages)
+    if error:
+        return f"Error: {error}", False, set()
+    
+    # Validate
+    is_valid, reason, found_citations, invalid_citations = validate_citations(answer, allowed_ids)
+    
+    if is_valid:
+        return answer, True, found_citations
+    
+    # Retry with stricter reminder
+    print(f"  ⚠ Citation validation failed: {reason}")
+    print(f"  🔄 Retrying with stricter prompt...")
+    
+    retry_message = f"""Your previous answer was rejected because: {reason}
+
+REMINDER - STRICT RULES:
+1. You MUST cite from these chunk IDs ONLY: {allowed_ids_str}
+2. Use format [chunk:<id>] for every factual claim
+3. If you cannot answer from the provided context, respond EXACTLY with: "{IDK_RESPONSE}"
+4. Do NOT invent any sources, books, pages, or URLs
+
+Please answer the question again using ONLY the provided CONTEXT.
+
+QUESTION: {question}"""
+
+    messages.append({"role": "assistant", "content": answer})
+    messages.append({"role": "user", "content": retry_message})
+    
+    answer2, error2 = call_ollama(model, messages)
+    if error2:
+        return f"Error on retry: {error2}", False, set()
+    
+    # Validate retry
+    is_valid2, reason2, found_citations2, _ = validate_citations(answer2, allowed_ids)
+    
+    if is_valid2:
+        return answer2, True, found_citations2
+    
+    # Still invalid after retry - return with warning
+    print(f"  ⚠ Still invalid after retry: {reason2}")
+    return f"[WARNING: Answer may contain invalid citations]\n\n{answer2}", False, found_citations2
+
+
+# ============================================================================
+# Main interactive loop
+# ============================================================================
 def main():
-    """Main interactive loop for RAG Q&A."""
-    print("=" * 60)
-    print("Local RAG with Ollama + C:\\Notes")
-    print("=" * 60)
+    """Main interactive loop for grounded RAG Q&A."""
+    print("=" * 70)
+    print("Grounded Local RAG with Ollama + C:\\Notes")
+    print("Citation-enforced answers from your knowledge base")
+    print("=" * 70)
     
     # Check Ollama connection
     print("\n🔍 Checking Ollama connection...")
     is_connected, available_models = check_ollama_connection()
     
     if not is_connected:
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("✗ ERROR: Ollama is not running.")
-        print("  Start Ollama Desktop or run `ollama serve`.")
-        print("=" * 60)
+        print()
+        print("  Start Ollama Desktop or run: ollama serve")
+        print()
+        print("  If you haven't created the grounded model yet:")
+        print("    ollama pull mistral-nemo:12b-instruct-2407-q4_K_M")
+        print("    ollama create rag-grounded-nemo -f ollama\\Modelfile.rag-grounded")
+        print("=" * 70)
         sys.exit(1)
     
     print(f"✓ Ollama is running at {OLLAMA_BASE_URL}")
-    print(f"  Available models: {', '.join(available_models) if available_models else 'None'}")
+    if available_models:
+        print(f"  Available models: {', '.join(available_models[:5])}")
     
     # Determine effective model
     effective_model = get_effective_model(available_models)
     print(f"\n📦 Using model: {effective_model}")
+    
+    # Warn if not using grounded model
+    if "grounded" not in effective_model.lower():
+        print("\n⚠ WARNING: Not using a grounded model!")
+        print("  For best results, create the grounded model:")
+        print("    ollama create rag-grounded-nemo -f ollama\\Modelfile.rag-grounded")
     
     # Initialize knowledge base
     print("\n📚 Initializing knowledge base...")
@@ -181,12 +353,15 @@ def main():
         print(f"✗ Error initializing knowledge base: {e}")
         sys.exit(1)
     
+    stats = kb.get_stats()
     print(f"\n✓ Ready!")
-    print(f"  - Data directory: C:\\Notes")
+    print(f"  - Data directory: {stats['data_directory']}")
+    print(f"  - Database: {stats['total_chunks']} chunks indexed")
     print(f"  - Model: {effective_model}")
-    print(f"  - Context chunks: {TOP_K_FULL}")
-    print("-" * 60)
-    print("Type your question and press Enter. Type 'exit' or 'quit' to stop.\n")
+    print(f"  - Context: top {RAG_TOP_K} chunks ({RAG_TOP_K_FULL} full)")
+    print("-" * 70)
+    print("Type your question and press Enter. Type 'exit' or 'quit' to stop.")
+    print("Answers will include [chunk:<id>] citations.\n")
     
     while True:
         try:
@@ -203,29 +378,38 @@ def main():
             break
 
         print("\n🔍 Searching knowledge base...")
-        context = retrieve_context(kb, question)
+        context_chunks, allowed_ids = retrieve_context(kb, question)
         
-        if not context:
+        if not context_chunks:
             print("⚠ No relevant results found in knowledge base.\n")
             continue
 
-        print(f"✓ Found {len(context)} relevant chunks.")
+        print(f"✓ Found {len(context_chunks)} relevant chunks.")
+        print(f"  Allowed chunk IDs: {', '.join(sorted(allowed_ids))}")
         
         # Show sources
         print("  Sources:")
-        for chunk in context:
+        for chunk in context_chunks:
             meta = chunk["metadata"]
             source = meta.get("relative_path", meta.get("filename", "unknown"))
-            print(f"    - {source} (score: {chunk['score']:.2f})")
+            print(f"    - [{chunk['id']}] {source} (score: {chunk['score']:.2f})")
         
         print(f"\n🤖 Asking {effective_model}...")
-        answer = ask_ollama(question, context, effective_model)
+        answer, is_valid, used_citations = ask_with_validation(
+            question, context_chunks, allowed_ids, effective_model
+        )
         
-        print("\n" + "=" * 60)
-        print("Answer:")
-        print("-" * 60)
+        print("\n" + "=" * 70)
+        if is_valid:
+            print("✓ Answer (validated):")
+        else:
+            print("⚠ Answer (validation failed):")
+        print("-" * 70)
         print(answer)
-        print("=" * 60 + "\n")
+        print("-" * 70)
+        if used_citations:
+            print(f"Citations used: {', '.join(sorted(used_citations))}")
+        print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
