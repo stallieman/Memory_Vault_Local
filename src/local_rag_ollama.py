@@ -3,15 +3,17 @@ Grounded Local RAG with Ollama + ChromaDB Knowledge Base
 Citation-enforced Q&A using local Ollama LLM with C:\\Notes as knowledge base.
 
 Features:
-- Strict grounding: answers only from provided context
+- Strict fail-fast grounding: answers only from provided context
 - Citation validation: [chunk:<id>] format required
-- Retry logic: re-asks with stricter prompt on citation failure
-- No hallucinated sources allowed
+- Single retry with fail-fast on second failure
+- Forbidden word detection for hallucinated sources
+- No silent fallbacks - raises exceptions on invalid answers
 """
 
 import os
 import re
 import sys
+import json
 import requests
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Set
@@ -28,8 +30,162 @@ RAG_MAX_CHARS_FULL = int(os.environ.get("RAG_MAX_CHARS_FULL", "4500"))
 RAG_SNIPPET_CHARS = int(os.environ.get("RAG_SNIPPET_CHARS", "400"))
 RAG_NUM_CTX = int(os.environ.get("RAG_NUM_CTX", "8192"))
 
-# The exact "I don't know" response
-IDK_RESPONSE = "I don't know based on the provided context."
+# ============================================================================
+# STRICT CITATION ENFORCEMENT CONSTANTS
+# ============================================================================
+# The EXACT "I don't know" response - must match character-for-character
+IDK = "I don't know based on the provided context."
+
+# Regex pattern for valid citations: [chunk:abc123_0001] or [chunk:def-456:0002]
+CITATION_PATTERN = re.compile(r"\[chunk:([A-Za-z0-9_:-]+)\]")
+
+# Forbidden words that indicate hallucinated external sources
+# If these appear WITHOUT a valid [chunk:...] citation nearby, it's suspicious
+FORBIDDEN_SOURCE_WORDS = {
+    # Books/publications
+    "chapter", "page", "pages", "isbn", "edition", "publisher",
+    # Websites
+    "baeldung", "stackoverflow", "medium.com", "dev.to", "wikipedia",
+    "geeksforgeeks", "tutorialspoint", "w3schools",
+    # Authors (common hallucination targets)
+    "kleppmann", "martin fowler", "uncle bob", "robert martin",
+    # Academic
+    "et al", "proceedings", "journal", "arxiv",
+}
+
+# Compile pattern for forbidden words (case-insensitive)
+FORBIDDEN_PATTERN = re.compile(
+    r'\b(' + '|'.join(re.escape(w) for w in FORBIDDEN_SOURCE_WORDS) + r')\b',
+    re.IGNORECASE
+)
+
+
+# ============================================================================
+# Custom Exception for Citation Validation Failures
+# ============================================================================
+class CitationValidationError(ValueError):
+    """Raised when answer fails citation validation after retry."""
+    
+    def __init__(self, reason: str, debug_payload: dict):
+        self.reason = reason
+        self.debug_payload = debug_payload
+        super().__init__(f"Citation validation failed: {reason}")
+
+
+# ============================================================================
+# Debug Bundle Printer
+# ============================================================================
+def print_debug_bundle(debug_payload: dict) -> None:
+    """Print complete debug information before raising exception."""
+    print("\n" + "=" * 70)
+    print("🚨 CITATION VALIDATION FAILURE - DEBUG BUNDLE")
+    print("=" * 70)
+    
+    print(f"\n📦 Model: {debug_payload.get('model', 'unknown')}")
+    
+    print(f"\n📋 Allowed Chunk IDs ({len(debug_payload.get('allowed_ids', []))}):")
+    for cid in sorted(debug_payload.get('allowed_ids', [])):
+        print(f"    - {cid}")
+    
+    print(f"\n📤 User Prompt Sent:")
+    print("-" * 70)
+    user_prompt = debug_payload.get('user_prompt', '')
+    # Truncate if very long
+    if len(user_prompt) > 3000:
+        print(user_prompt[:3000])
+        print(f"\n... [truncated, {len(user_prompt)} chars total]")
+    else:
+        print(user_prompt)
+    print("-" * 70)
+    
+    print(f"\n📥 Raw Model Output:")
+    print("-" * 70)
+    print(debug_payload.get('model_output', ''))
+    print("-" * 70)
+    
+    print(f"\n❌ Failure Reason: {debug_payload.get('reason', 'unknown')}")
+    
+    if debug_payload.get('found_citations'):
+        print(f"\n🔍 Citations Found: {debug_payload.get('found_citations')}")
+    if debug_payload.get('invalid_citations'):
+        print(f"🚫 Invalid Citations: {debug_payload.get('invalid_citations')}")
+    if debug_payload.get('forbidden_words_found'):
+        print(f"⚠️  Forbidden Words Found: {debug_payload.get('forbidden_words_found')}")
+    
+    print("\n" + "=" * 70)
+
+
+# ============================================================================
+# STRICT Citation Validation (Fail-Fast)
+# ============================================================================
+def validate_answer(
+    text: str,
+    allowed_ids: Set[str],
+    debug_payload: dict
+) -> Set[str]:
+    """
+    Validate that an answer contains proper citations.
+    
+    FAIL-FAST: Raises CitationValidationError if validation fails.
+    
+    Args:
+        text: The model's response text
+        allowed_ids: Set of valid chunk IDs from the context
+        debug_payload: Dict with debug info (model, user_prompt, etc.)
+    
+    Returns:
+        Set of valid citation IDs found (only if validation passes)
+    
+    Raises:
+        CitationValidationError: If validation fails for any reason
+    """
+    text_stripped = text.strip()
+    
+    # ACCEPT: Exact IDK response
+    if text_stripped == IDK:
+        return set()  # No citations needed for IDK
+    
+    # Extract all citations
+    found_citations = set(CITATION_PATTERN.findall(text))
+    
+    # FAIL: No citations found
+    if not found_citations:
+        debug_payload['reason'] = "No citations found"
+        debug_payload['model_output'] = text
+        debug_payload['found_citations'] = set()
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError("No citations found", debug_payload)
+    
+    # FAIL: Unknown citation IDs
+    invalid_citations = found_citations - allowed_ids
+    if invalid_citations:
+        debug_payload['reason'] = f"Unknown citation ids: {invalid_citations}"
+        debug_payload['model_output'] = text
+        debug_payload['found_citations'] = found_citations
+        debug_payload['invalid_citations'] = invalid_citations
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError(
+            f"Unknown citation ids: {invalid_citations}", 
+            debug_payload
+        )
+    
+    # WARN/FAIL: Forbidden words detected (potential hallucination)
+    forbidden_matches = FORBIDDEN_PATTERN.findall(text.lower())
+    if forbidden_matches:
+        # Check if these forbidden words appear near a citation
+        # For now, just warn but don't fail (could be legitimate context)
+        unique_forbidden = set(forbidden_matches)
+        debug_payload['forbidden_words_found'] = unique_forbidden
+        print(f"  ⚠️  Warning: Potential external sources mentioned: {unique_forbidden}")
+        # Uncomment to make this a hard failure:
+        # debug_payload['reason'] = f"Forbidden source words found: {unique_forbidden}"
+        # debug_payload['model_output'] = text
+        # debug_payload['found_citations'] = found_citations
+        # print_debug_bundle(debug_payload)
+        # raise CitationValidationError(f"Forbidden source words: {unique_forbidden}", debug_payload)
+    
+    # SUCCESS: All citations are valid
+    return found_citations
 
 
 # ============================================================================
@@ -154,49 +310,6 @@ def build_context_payload(context_chunks: List[Dict]) -> str:
 
 
 # ============================================================================
-# Citation validation
-# ============================================================================
-def extract_citations(text: str) -> Set[str]:
-    """
-    Extract all [chunk:<id>] citations from the model output.
-    Returns set of chunk IDs found.
-    """
-    pattern = r'\[chunk:([^\]]+)\]'
-    matches = re.findall(pattern, text)
-    return set(matches)
-
-
-def validate_citations(
-    answer: str, 
-    allowed_ids: Set[str]
-) -> Tuple[bool, str, Set[str], Set[str]]:
-    """
-    Validate that the answer contains proper citations.
-    
-    Returns: (is_valid, reason, found_citations, invalid_citations)
-    """
-    answer_stripped = answer.strip()
-    
-    # Check for exact IDK response
-    if answer_stripped == IDK_RESPONSE:
-        return True, "IDK response accepted", set(), set()
-    
-    # Extract citations
-    found_citations = extract_citations(answer)
-    
-    # Check for at least one citation
-    if not found_citations:
-        return False, "No citations found in answer", set(), set()
-    
-    # Check all citations are valid
-    invalid_citations = found_citations - allowed_ids
-    if invalid_citations:
-        return False, f"Invalid chunk IDs cited: {invalid_citations}", found_citations, invalid_citations
-    
-    return True, "Valid citations", found_citations, set()
-
-
-# ============================================================================
 # Ollama chat
 # ============================================================================
 def call_ollama(
@@ -233,23 +346,39 @@ def call_ollama(
         return "", f"Ollama error: {str(e)}"
 
 
-def ask_with_validation(
+# ============================================================================
+# STRICT Fail-Fast Ask with Validation
+# ============================================================================
+def ask_with_strict_validation(
     question: str,
     context_chunks: List[Dict],
     allowed_ids: Set[str],
     model: str
-) -> Tuple[str, bool, Set[str]]:
+) -> Tuple[str, Set[str]]:
     """
-    Ask the question with context and validate citations.
-    Retries once with stricter prompt if validation fails.
+    Ask the question with context and STRICTLY validate citations.
     
-    Returns: (answer, is_valid, used_citations)
+    FAIL-FAST: Raises CitationValidationError if validation fails after retry.
+    No silent fallbacks, no warnings-only - either valid or exception.
+    
+    Args:
+        question: User's question
+        context_chunks: Retrieved context chunks
+        allowed_ids: Set of valid chunk IDs
+        model: Ollama model name
+    
+    Returns:
+        Tuple of (validated_answer, used_citations)
+    
+    Raises:
+        CitationValidationError: If answer fails validation after retry
+        RuntimeError: If Ollama returns an error
     """
     context_text = build_context_payload(context_chunks)
     allowed_ids_str = ", ".join(sorted(allowed_ids))
     
-    # Initial user message
-    user_message = f"""CONTEXT:
+    # Build the user prompt
+    user_prompt = f"""CONTEXT:
 {context_text}
 
 ALLOWED CHUNK IDS: {allowed_ids_str}
@@ -257,52 +386,63 @@ ALLOWED CHUNK IDS: {allowed_ids_str}
 QUESTION: {question}"""
 
     messages = [
-        {"role": "user", "content": user_message}
+        {"role": "user", "content": user_prompt}
     ]
     
-    # First attempt
+    # Prepare debug payload (will be filled on failure)
+    debug_payload = {
+        "model": model,
+        "allowed_ids": allowed_ids,
+        "user_prompt": user_prompt,
+        "question": question,
+    }
+    
+    # ========== FIRST ATTEMPT ==========
     answer, error = call_ollama(model, messages)
     if error:
-        return f"Error: {error}", False, set()
+        raise RuntimeError(f"Ollama error: {error}")
     
-    # Validate
-    is_valid, reason, found_citations, invalid_citations = validate_citations(answer, allowed_ids)
+    # Try to validate
+    try:
+        used_citations = validate_answer(answer, allowed_ids, debug_payload.copy())
+        return answer, used_citations  # SUCCESS on first try
+    except CitationValidationError as e:
+        # First attempt failed - will retry
+        first_failure_reason = e.reason
+        print(f"  ⚠️  First attempt failed: {first_failure_reason}")
+        print(f"  🔄 Retrying with stricter prompt...")
     
-    if is_valid:
-        return answer, True, found_citations
-    
-    # Retry with stricter reminder
-    print(f"  ⚠ Citation validation failed: {reason}")
-    print(f"  🔄 Retrying with stricter prompt...")
-    
-    retry_message = f"""Your previous answer was rejected because: {reason}
+    # ========== SINGLE RETRY ==========
+    retry_prompt = f"""Your previous answer was REJECTED because: {first_failure_reason}
 
-REMINDER - STRICT RULES:
-1. You MUST cite from these chunk IDs ONLY: {allowed_ids_str}
-2. Use format [chunk:<id>] for every factual claim
-3. If you cannot answer from the provided context, respond EXACTLY with: "{IDK_RESPONSE}"
-4. Do NOT invent any sources, books, pages, or URLs
+⚠️ STRICT RULES - YOU MUST FOLLOW:
+1. Cite ONLY from these chunk IDs: {allowed_ids_str}
+2. Use EXACT format [chunk:<id>] for EVERY factual claim
+3. If you CANNOT answer from the CONTEXT, respond EXACTLY with:
+   "{IDK}"
+4. Do NOT mention ANY external sources (books, websites, authors, pages)
 
-Please answer the question again using ONLY the provided CONTEXT.
+Answer the question again using ONLY the provided CONTEXT.
 
 QUESTION: {question}"""
 
     messages.append({"role": "assistant", "content": answer})
-    messages.append({"role": "user", "content": retry_message})
+    messages.append({"role": "user", "content": retry_prompt})
+    
+    # Update debug payload with retry info
+    debug_payload['retry_prompt'] = retry_prompt
+    debug_payload['first_answer'] = answer
+    debug_payload['first_failure_reason'] = first_failure_reason
     
     answer2, error2 = call_ollama(model, messages)
     if error2:
-        return f"Error on retry: {error2}", False, set()
+        raise RuntimeError(f"Ollama error on retry: {error2}")
     
-    # Validate retry
-    is_valid2, reason2, found_citations2, _ = validate_citations(answer2, allowed_ids)
+    # ========== VALIDATE RETRY (FAIL-FAST) ==========
+    # This will raise CitationValidationError if invalid
+    used_citations = validate_answer(answer2, allowed_ids, debug_payload)
     
-    if is_valid2:
-        return answer2, True, found_citations2
-    
-    # Still invalid after retry - return with warning
-    print(f"  ⚠ Still invalid after retry: {reason2}")
-    return f"[WARNING: Answer may contain invalid citations]\n\n{answer2}", False, found_citations2
+    return answer2, used_citations  # SUCCESS on retry
 
 
 # ============================================================================
@@ -312,7 +452,7 @@ def main():
     """Main interactive loop for grounded RAG Q&A."""
     print("=" * 70)
     print("Grounded Local RAG with Ollama + C:\\Notes")
-    print("Citation-enforced answers from your knowledge base")
+    print("STRICT Citation Enforcement - Fail-Fast Mode")
     print("=" * 70)
     
     # Check Ollama connection
@@ -341,7 +481,7 @@ def main():
     
     # Warn if not using grounded model
     if "grounded" not in effective_model.lower():
-        print("\n⚠ WARNING: Not using a grounded model!")
+        print("\n⚠️  WARNING: Not using a grounded model!")
         print("  For best results, create the grounded model:")
         print("    ollama create rag-grounded-nemo -f ollama\\Modelfile.rag-grounded")
     
@@ -354,14 +494,15 @@ def main():
         sys.exit(1)
     
     stats = kb.get_stats()
-    print(f"\n✓ Ready!")
+    print(f"\n✓ Ready! (STRICT MODE)")
     print(f"  - Data directory: {stats['data_directory']}")
     print(f"  - Database: {stats['total_chunks']} chunks indexed")
     print(f"  - Model: {effective_model}")
     print(f"  - Context: top {RAG_TOP_K} chunks ({RAG_TOP_K_FULL} full)")
+    print(f"  - Citation enforcement: FAIL-FAST (no invalid answers allowed)")
     print("-" * 70)
     print("Type your question and press Enter. Type 'exit' or 'quit' to stop.")
-    print("Answers will include [chunk:<id>] citations.\n")
+    print("All answers MUST include valid [chunk:<id>] citations or will be rejected.\n")
     
     while True:
         try:
@@ -381,7 +522,7 @@ def main():
         context_chunks, allowed_ids = retrieve_context(kb, question)
         
         if not context_chunks:
-            print("⚠ No relevant results found in knowledge base.\n")
+            print("⚠️  No relevant results found in knowledge base.\n")
             continue
 
         print(f"✓ Found {len(context_chunks)} relevant chunks.")
@@ -395,21 +536,41 @@ def main():
             print(f"    - [{chunk['id']}] {source} (score: {chunk['score']:.2f})")
         
         print(f"\n🤖 Asking {effective_model}...")
-        answer, is_valid, used_citations = ask_with_validation(
-            question, context_chunks, allowed_ids, effective_model
-        )
         
-        print("\n" + "=" * 70)
-        if is_valid:
-            print("✓ Answer (validated):")
-        else:
-            print("⚠ Answer (validation failed):")
-        print("-" * 70)
-        print(answer)
-        print("-" * 70)
-        if used_citations:
-            print(f"Citations used: {', '.join(sorted(used_citations))}")
-        print("=" * 70 + "\n")
+        try:
+            # STRICT validation - will raise exception if invalid
+            answer, used_citations = ask_with_strict_validation(
+                question, context_chunks, allowed_ids, effective_model
+            )
+            
+            # SUCCESS - answer is validated
+            print("\n" + "=" * 70)
+            print("✅ Answer (VALIDATED):")
+            print("-" * 70)
+            print(answer)
+            print("-" * 70)
+            if used_citations:
+                print(f"📎 Citations: {', '.join(sorted(used_citations))}")
+            elif answer.strip() == IDK:
+                print("ℹ️  Response: I don't know (no citations needed)")
+            print("=" * 70 + "\n")
+            
+        except CitationValidationError as e:
+            # FAIL-FAST: Citation validation failed after retry
+            print("\n" + "=" * 70)
+            print("❌ ANSWER REJECTED - Citation validation failed")
+            print(f"   Reason: {e.reason}")
+            print("=" * 70)
+            print("\nThe model failed to provide a properly cited answer.")
+            print("This could mean:")
+            print("  - The context doesn't contain relevant information")
+            print("  - The model is hallucinating sources")
+            print("  - The grounded model isn't properly configured")
+            print("\nTry rephrasing your question or check if the topic is in your notes.\n")
+            
+        except RuntimeError as e:
+            # Ollama connection error
+            print(f"\n❌ Error: {e}\n")
 
 
 if __name__ == "__main__":
