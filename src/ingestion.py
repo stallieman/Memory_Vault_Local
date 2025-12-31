@@ -15,6 +15,25 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pypdf import PdfReader
 
 
+# Mapping: top-level folder (lowercase) -> source_group
+SOURCE_GROUP_MAP = {
+    "sql": "sql",
+    "tdv": "tdv",
+    "elastic": "elastic",
+    "python": "python",
+    "docker": "docker",
+    "git": "git",
+    "ai": "ai",
+    "ebooks": "ebooks",
+    "microsoft": "microsoft",
+    "tools": "tools",
+    "personal": "personal",
+    "misc": "misc",
+    "readwise": "misc",  # Readwise maps to misc
+    "inbox": "inbox",
+}
+
+
 class DocumentIngestion:
     """Handles document ingestion into ChromaDB."""
     
@@ -88,7 +107,19 @@ class DocumentIngestion:
         except ValueError:
             rel = str(file_path)
         return rel
-    
+
+    def _get_source_group(self, relative_path: Path) -> str:
+        """
+        Determine source_group from the top-level folder of relative_path.
+        Returns the mapped group or 'misc' for unknown/root files.
+        """
+        parts = Path(relative_path).parts
+        if not parts:
+            return "misc"  # Root file without folder
+        
+        top_folder = parts[0].lower()
+        return SOURCE_GROUP_MAP.get(top_folder, "misc")
+
     def _chunk_id(self, doc_key: str, chunk_index: int) -> str:
         """Generate a unique chunk ID from document key and chunk index."""
         h = hashlib.sha1(doc_key.encode("utf-8")).hexdigest()[:12]
@@ -185,10 +216,14 @@ class DocumentIngestion:
             if is_markdown:
                 heading_context = self.extract_heading_context(text, chunk_start)
             
+            # Determine source_group from top-level folder
+            source_group = self._get_source_group(relative_path)
+            
             metadata = {
                 "source": str(file_path),
                 "filename": file_path.name,
                 "relative_path": str(relative_path),
+                "source_group": source_group,
                 "file_type": file_path.suffix,
                 "doc_id": doc_id,
                 "chunk_id": i,
@@ -218,7 +253,15 @@ class DocumentIngestion:
     
     def ingest_file(self, file_path: Path) -> bool:
         """Ingest a single file into the database."""
+        # Calculate relative path and source_group for logging
+        try:
+            relative_path = file_path.relative_to(self.data_dir)
+        except ValueError:
+            relative_path = file_path
+        source_group = self._get_source_group(relative_path)
+        
         print(f"📄 Ingesting: {file_path.name}")
+        print(f"   → relative_path: {relative_path}, source_group: {source_group}")
         
         # Read file
         content = self.read_file(file_path)
@@ -266,8 +309,12 @@ class DocumentIngestion:
             print(f"✗ Error ingesting {file_path.name}: {e}")
             return False
     
-    def remove_file(self, file_path: Path) -> bool:
-        """Remove all chunks of a file from the database."""
+    def remove_file(self, file_path: Path) -> int:
+        """
+        Remove all chunks of a file from the database.
+        Uses relative_path metadata for precise matching (handles same filename in different dirs).
+        Returns: number of chunks removed (0 if none found or error)
+        """
         try:
             # Calculate relative path to match what's stored in metadata
             try:
@@ -275,19 +322,22 @@ class DocumentIngestion:
             except ValueError:
                 relative_path = file_path
             
+            rel_path_str = str(relative_path)
+            
             # Filter on relative_path to handle files with same name in different directories
             results = self.collection.get(
-                where={"relative_path": str(relative_path)}
+                where={"relative_path": rel_path_str}
             )
             
             if results['ids']:
+                chunk_count = len(results['ids'])
                 self.collection.delete(ids=results['ids'])
-                print(f"🗑️  Removed {len(results['ids'])} chunks from {file_path.name}")
-                return True
-            return False
+                print(f"🗑️  Removed {chunk_count} chunks for relative_path='{rel_path_str}'")
+                return chunk_count
+            return 0
         except Exception as e:
-            print(f"✗ Error removing {file_path.name}: {e}")
-            return False
+            print(f"✗ Error removing file (relative_path='{file_path}'): {e}")
+            return 0
     
     def ingest_directory(self, directory: Optional[Path] = None) -> int:
         """Ingest all supported files in a directory and its subdirectories."""
@@ -335,13 +385,27 @@ class DocumentIngestion:
         print(f"  Total documents in database: {self.collection.count()}")
         return success_count
     
-    def query(self, query_text: str, n_results: int = 5) -> Dict:
-        """Query the knowledge base."""
+    def query(self, query_text: str, n_results: int = 5, where: Dict = None) -> Dict:
+        """
+        Query the knowledge base.
+        
+        Args:
+            query_text: The search query
+            n_results: Maximum number of results to return
+            where: Optional filter dict, e.g. {"source_group": "sql"}
+        
+        Returns:
+            Dict with 'results' (ChromaDB format) and 'count'
+        """
         try:
-            results = self.collection.query(
-                query_texts=[query_text],
-                n_results=n_results
-            )
+            query_kwargs = {
+                "query_texts": [query_text],
+                "n_results": n_results,
+            }
+            if where:
+                query_kwargs["where"] = where
+            
+            results = self.collection.query(**query_kwargs)
             
             return {
                 "results": results,
@@ -384,18 +448,94 @@ class DocumentIngestion:
         }
 
 
+    def sanity_check(self, sample_size: int = 5) -> None:
+        """
+        Print random samples from the database to verify metadata correctness.
+        Shows filename, relative_path, and source_group.
+        Also shows distribution of source_groups.
+        """
+        import random
+        from collections import Counter
+        
+        print(f"\n🔬 SANITY CHECK: {sample_size} random documents")
+        print("=" * 60)
+        
+        # Get all unique relative_paths
+        try:
+            all_docs = self.collection.get(include=["metadatas"])
+            if not all_docs['ids']:
+                print("  No documents in database!")
+                return
+            
+            # Group by relative_path to get unique docs
+            unique_docs = {}
+            source_group_counts = Counter()
+            for i, meta in enumerate(all_docs['metadatas']):
+                rel_path = meta.get('relative_path', 'unknown')
+                sg = meta.get('source_group', 'unknown')
+                source_group_counts[sg] += 1
+                if rel_path not in unique_docs:
+                    unique_docs[rel_path] = meta
+            
+            # Sample random docs
+            sample_paths = random.sample(list(unique_docs.keys()), min(sample_size, len(unique_docs)))
+            
+            for i, rel_path in enumerate(sample_paths, 1):
+                meta = unique_docs[rel_path]
+                print(f"\n  [{i}] {meta.get('filename', 'N/A')}")
+                print(f"      relative_path: {rel_path}")
+                print(f"      source_group:  {meta.get('source_group', '(not set)')}")
+                print(f"      total_chunks:  {meta.get('total_chunks', 'N/A')}")
+            
+            print(f"\n  Total unique documents: {len(unique_docs)}")
+            print(f"\n  📊 SOURCE_GROUP DISTRIBUTION (chunks):")
+            for sg, count in sorted(source_group_counts.items(), key=lambda x: -x[1]):
+                print(f"      {sg:12}: {count:5} chunks")
+            print("=" * 60)
+            
+        except Exception as e:
+            print(f"  Error during sanity check: {e}")
+
+
 if __name__ == "__main__":
-    # Test ingestion
+    import sys
+    
+    # Parse arguments
+    force_reindex = "--force" in sys.argv or "-f" in sys.argv
+    
+    print("="*70)
+    print("📚 KNOWLEDGE BASE RE-INGESTION")
+    print("="*70)
+    
+    # Initialize ingestion
     ingestion = DocumentIngestion()
-    ingestion.ingest_directory()
     
-    # Test query
-    print("\n🔍 Testing query...")
-    results = ingestion.query("Docker commands", n_results=3)
-    print(f"Found {results['count']} results")
+    # Show pre-ingest stats
+    pre_count = ingestion.collection.count()
+    print(f"\n📊 PRE-INGEST: {pre_count} chunks in database")
     
-    # Show stats
-    print("\n📊 Database stats:")
+    if force_reindex or pre_count == 0:
+        # Full re-ingest
+        print("\n🔄 Starting full re-ingestion...")
+        ingestion.ingest_directory()
+    else:
+        print(f"\n⚠ Database already has {pre_count} chunks.")
+        print("  Use --force or -f to force full re-ingestion.")
+        print("  Running re-ingest anyway...")
+        ingestion.ingest_directory()
+    
+    # Show post-ingest stats
+    print("\n" + "="*70)
+    print("📊 POST-INGEST STATISTICS")
+    print("="*70)
     stats = ingestion.get_stats()
     for key, value in stats.items():
         print(f"  {key}: {value}")
+    
+    # Sanity check
+    ingestion.sanity_check(sample_size=5)
+    
+    # Test query
+    print("\n🔍 Test query: 'Docker commands'")
+    results = ingestion.query("Docker commands", n_results=3)
+    print(f"  Found {results['count']} results")

@@ -2,6 +2,34 @@
 
 A **Model Context Protocol (MCP) Server** that acts as a bridge between local documentation and Large Language Models via RAG (Retrieval-Augmented Generation). Features **citation-enforced grounding** with local Ollama LLM for fully offline RAG queries.
 
+---
+
+## ⚡ Quickstart
+
+```powershell
+# View database stats
+.\tasks.ps1 stats
+
+# Start GUI (recommended)
+.\tasks.ps1 gui
+
+# Or start file watcher for auto-indexing
+.\tasks.ps1 watcher
+```
+
+> 📖 **Full operations guide:** See [OPERATIONS.md](OPERATIONS.md)
+
+### Watcher vs Full Re-Ingest
+
+| Mode | When to use |
+|------|-------------|
+| **Watcher** (`.\tasks.ps1 watcher`) | Daily use - auto-indexes new/changed/deleted files in real-time |
+| **Full Re-Ingest** (`.\tasks.ps1 reindex`) | After folder restructure, DB corruption, or embedding model change |
+
+The watcher monitors `C:\Notes` and triggers incremental updates. Full re-ingest rebuilds the entire database (~35k chunks, takes a few minutes).
+
+---
+
 ## 🎯 Features
 
 - ✅ **Supported file types:** Markdown (.md), Text (.txt), PDF (.pdf)

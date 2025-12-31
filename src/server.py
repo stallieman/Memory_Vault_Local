@@ -12,6 +12,7 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 from ingestion import DocumentIngestion
+from retrieval import PrioritizedRetriever, GROUP_ORDER, RAG_TOP_K_TOTAL, RAG_TOP_K_PER_GROUP
 
 
 def _safe_get(d: dict, key: str, default: str = "") -> str:
@@ -33,7 +34,7 @@ def compact_metadata(metadata: dict) -> dict:
     allow = {
         "filename", "relative_path", "file_type",
         "chunk_id", "total_chunks",
-        "source", "doc_id",
+        "source", "doc_id", "source_group",
         "h1", "h2", "h3", "title",
         "start_char", "end_char"
     }
@@ -139,6 +140,11 @@ class KnowledgeBaseMCPServer:
                                 "description": "Aantal resultaten (standaard: 5)",
                                 "default": 5
                             },
+                            "source_group": {
+                                "type": "string",
+                                "description": "Filter op source_group (sql, tdv, elastic, python, docker, git, ai, ebooks, microsoft, tools, personal, misc). Laat leeg voor alle groepen.",
+                                "enum": ["sql", "tdv", "elastic", "python", "docker", "git", "ai", "ebooks", "microsoft", "tools", "personal", "misc", ""],
+                            },
                             "snippet_chars": {
                                 "type": "number",
                                 "description": "Max lengte van snippet per resultaat (default: 400)",
@@ -153,6 +159,40 @@ class KnowledgeBaseMCPServer:
                                 "type": "boolean",
                                 "description": "Als true: voeg ook machine-readable JSON toe (structuredContent + JSON tekstblock)",
                                 "default": True
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                ),
+                types.Tool(
+                    name="query_knowledge_base_prioritized",
+                    description=(
+                        "Zoek in de lokale knowledge base met prioritized retrieval. "
+                        "Haalt chunks op uit meerdere source_groups in prioriteitsvolgorde "
+                        "(sql, tdv, elastic, python, docker, git, ai, microsoft, tools, personal, ebooks, misc). "
+                        "Dit zorgt voor diverse resultaten over verschillende kennisdomeinen."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "De zoekvraag in natuurlijke taal"
+                            },
+                            "top_k_total": {
+                                "type": "number",
+                                "description": f"Totaal aantal chunks om terug te geven (default: {RAG_TOP_K_TOTAL})",
+                                "default": RAG_TOP_K_TOTAL
+                            },
+                            "per_group_k": {
+                                "type": "number",
+                                "description": f"Max chunks per source_group (default: {RAG_TOP_K_PER_GROUP})",
+                                "default": RAG_TOP_K_PER_GROUP
+                            },
+                            "snippet_chars": {
+                                "type": "number",
+                                "description": "Max lengte van snippet per resultaat (default: 400)",
+                                "default": 400
                             }
                         },
                         "required": ["query"]
@@ -226,6 +266,7 @@ class KnowledgeBaseMCPServer:
             if name == "query_knowledge_base":
                 query = arguments.get("query", "")
                 n_results = arguments.get("n_results", 5)
+                source_group = arguments.get("source_group", "")
                 snippet_chars = int(arguments.get("snippet_chars", 400))
                 include_full_text = bool(arguments.get("include_full_text", False))
                 return_json = arguments.get("return_json", True)
@@ -236,8 +277,9 @@ class KnowledgeBaseMCPServer:
                         text="Error: Query parameter is required"
                     )]
                 
-                # Perform query
-                results = self.ingestion.query(query, n_results=n_results)
+                # Perform query with optional source_group filter
+                where_filter = {"source_group": source_group} if source_group else None
+                results = self.ingestion.query(query, n_results=n_results, where=where_filter)
                 
                 if results['count'] == 0:
                     return [types.TextContent(
@@ -310,6 +352,82 @@ class KnowledgeBaseMCPServer:
                     ]
                 else:
                     return [types.TextContent(type="text", text=response)]
+            
+            elif name == "query_knowledge_base_prioritized":
+                query = arguments.get("query", "")
+                top_k_total = int(arguments.get("top_k_total", RAG_TOP_K_TOTAL))
+                per_group_k = int(arguments.get("per_group_k", RAG_TOP_K_PER_GROUP))
+                snippet_chars = int(arguments.get("snippet_chars", 400))
+                
+                if not query:
+                    return [types.TextContent(
+                        type="text",
+                        text="Error: Query parameter is required"
+                    )]
+                
+                # Perform prioritized query
+                retriever = PrioritizedRetriever(self.ingestion)
+                results = retriever.query_with_priority(
+                    query_text=query,
+                    top_k_total=top_k_total,
+                    per_group_k=per_group_k,
+                )
+                
+                if results['count'] == 0:
+                    return [types.TextContent(
+                        type="text",
+                        text=f"Geen resultaten gevonden voor: '{query}'"
+                    )]
+                
+                # Build response
+                items = []
+                response = f"# Prioritized zoekresultaten voor: '{query}'\n\n"
+                response += f"Gevonden {results['count']} relevante passages.\n\n"
+                response += f"**Source group verdeling:** {results.get('group_stats', {})}\n\n"
+                
+                for rank, (doc, metadata, distance, doc_id) in enumerate(zip(
+                    results['results']['documents'][0],
+                    results['results']['metadatas'][0],
+                    results['results']['distances'][0],
+                    results['results']['ids'][0]
+                ), 1):
+                    citation = format_citation(metadata)
+                    source_group = metadata.get("source_group", "unknown")
+                    score = 1 - float(distance)
+                    snippet = make_snippet(doc, snippet_chars)
+                    
+                    response += f"## Resultaat {rank} [{source_group}]\n"
+                    response += f"**ID:** `{doc_id}`\n"
+                    response += f"**Cite:** {citation}\n"
+                    response += f"**Score:** {score:.2%}\n\n"
+                    response += f"{snippet}\n\n---\n\n"
+                    
+                    items.append({
+                        "rank": rank,
+                        "id": doc_id,
+                        "score": score,
+                        "source_group": source_group,
+                        "snippet": snippet,
+                        "citation": citation,
+                        "metadata": compact_metadata(metadata),
+                    })
+                
+                payload = {
+                    "query": query,
+                    "top_k_total": top_k_total,
+                    "per_group_k": per_group_k,
+                    "count": results["count"],
+                    "group_stats": results.get("group_stats", {}),
+                    "items": items,
+                }
+                
+                return [
+                    types.TextContent(type="text", text=response),
+                    types.TextContent(
+                        type="text",
+                        text=f"```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```"
+                    ),
+                ]
             
             elif name == "get_chunk_by_id":
                 chunk_id = arguments.get("id", "")
