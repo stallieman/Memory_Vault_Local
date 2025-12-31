@@ -53,6 +53,13 @@ Alle commando's vanuit repo root (`c:\Projecten\memory-vault-main\memory-vault-m
 | `.\tasks.ps1 stats` | Toon DB statistieken |
 | `.\tasks.ps1 reindex` | Full re-ingest (met confirmatie) |
 | `.\tasks.ps1 sanity` | Run sanity check |
+| `.\tasks.ps1 new-howto <group> <title>` | Maak nieuwe howto van template |
+
+**Voorbeeld new-howto:**
+```powershell
+.\tasks.ps1 new-howto elastic "Kibana data view refresh fields"
+# Maakt: C:\Notes\elastic\howto\kibana-data-view-refresh-fields.md
+```
 
 **Handmatig (indien tasks.ps1 niet werkt):**
 ```powershell
