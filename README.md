@@ -1,189 +1,179 @@
 # Local Knowledge Base MCP Server
 
-A **Model Context Protocol (MCP) Server** that acts as a bridge between local documentation and Large Language Models via RAG (Retrieval-Augmented Generation).
+A **Model Context Protocol (MCP) Server** that acts as a bridge between local documentation and Large Language Models via RAG (Retrieval-Augmented Generation). Now with **local Ollama LLM integration** for fully offline RAG queries.
 
 ## 🎯 Features
 
 - ✅ **Supported file types:** Markdown (.md), Text (.txt), PDF (.pdf)
-- 🔍 **Contextual search:** Natural language queries
-- 👀 **Automatic synchronization:** Real-time monitoring of the `./data` directory
-- 🚀 **MCP Protocol:** Standard interface for LLM clients
+- 🔍 **Contextual search:** Natural language queries via ChromaDB
+- 📁 **Data source:** Reads from `C:\Notes` directory (configurable)
+- 🚀 **MCP Protocol:** Standard interface for LLM clients (Claude Desktop, etc.)
 - 💾 **Local vector database:** ChromaDB (no external server required)
 - 🧠 **Local embeddings:** sentence-transformers (all-MiniLM-L6-v2)
-- 🔄 **Auto-start watcher:** Automatic background service via LaunchAgent
+- 🦙 **Ollama RAG:** Standalone RAG with local Ollama LLM (no API keys needed!)
+- 👀 **File watcher:** Real-time monitoring and auto-indexing
 
 ## 📋 Requirements
 
-- Python 3.10 or higher
-- pip
-- macOS (for LaunchAgent auto-start feature)
+- **Python 3.12** (tested with 3.12.9)
+- **Windows 11** (also works on macOS/Linux with path adjustments)
+- **Ollama** running locally at `http://localhost:11434` (for RAG feature)
 
 ## 🚀 Installation
 
 1. Clone the repository:
-```bash
-git clone https://github.com/stallieman/memory-vault.git
-cd memory-vault
+```powershell
+git clone https://github.com/stallieman/Memory_Vault_Local.git
+cd Memory_Vault_Local
 ```
 
 2. Create a virtual environment and install dependencies:
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On macOS/Linux
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-3. Install the automatic watcher service (macOS only):
-```bash
-cp com.local-mcp-kb.watcher.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.local-mcp-kb.watcher.plist
+3. Ensure your notes are in `C:\Notes` (or update the path in `src/ingestion.py`)
+
+4. Run initial ingestion:
+```powershell
+python src/ingestion.py
 ```
 
 ## 💡 Usage
 
-### 1. MCP Server (for use with Claude Desktop or other MCP clients)
+### 1. Ollama RAG (Recommended - Fully Local)
 
-```bash
+Query your knowledge base using a local Ollama model:
+
+```powershell
+python src/local_rag_ollama.py
+```
+
+This will:
+- Check Ollama connectivity at `http://localhost:11434`
+- Auto-detect available models (defaults to `mistral-nemo:12b-instruct-2407-q4_K_M`)
+- Start an interactive chat session with RAG
+
+**Example session:**
+```
+🦙 Ollama RAG - Local Knowledge Base
+=====================================
+Model: mistral-nemo:12b-instruct-2407-q4_K_M
+Database: 31,556 chunks indexed
+
+Vraag: Hoe maak ik een Docker container?
+
+[Searches knowledge base, retrieves context, generates answer...]
+```
+
+### 2. MCP Server (for Claude Desktop)
+
+```powershell
 python src/server.py
 ```
 
-The MCP server:
-- Performs initial ingestion of all files in `./data`
-- Starts an MCP server that communicates via stdio
-- Exposes the following tools:
-  - `query_knowledge_base`: Search the knowledge base
-  - `get_knowledge_base_stats`: Get statistics
-  - `refresh_knowledge_base`: Re-index all documents
+Exposes these tools:
+- `query_knowledge_base`: Search the knowledge base
+- `get_knowledge_base_stats`: Get statistics
+- `refresh_knowledge_base`: Re-index all documents
 
-### 2. File Watcher (for continuous synchronization)
+### 3. File Watcher (for continuous sync)
 
-The watcher runs automatically in the background after installation. To start manually:
-
-```bash
+```powershell
 python src/watcher.py
 ```
 
-The watcher:
-- Performs initial ingestion
-- Continuously monitors the `./data` directory
-- Automatically indexes new files
-- Updates modified files
-- Removes deleted files from the index
+Monitors `C:\Notes` for changes and auto-indexes new/modified files.
 
-### 3. Standalone Ingestion (for one-time indexing)
+### 4. Standalone Ingestion
 
-```bash
+```powershell
 python src/ingestion.py
 ```
 
+One-time indexing of all documents in `C:\Notes`.
+
 ## 🔧 Configuration for Claude Desktop
 
-Add the following to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
+Add to your Claude Desktop config (`%APPDATA%\Claude\claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "local-knowledge-base": {
-      "command": "/absolute/path/to/memory-vault/.venv/bin/python",
-      "args": ["/absolute/path/to/memory-vault/src/server.py"],
-      "cwd": "/absolute/path/to/memory-vault"
+      "command": "C:\\Projecten\\Memory_Vault_Local\\venv\\Scripts\\python.exe",
+      "args": ["C:\\Projecten\\Memory_Vault_Local\\src\\server.py"],
+      "cwd": "C:\\Projecten\\Memory_Vault_Local"
     }
   }
 }
 ```
 
-**Note:** Replace `/absolute/path/to/memory-vault` with the actual absolute path to your project directory.
-
 ## 📁 Project Structure
 
 ```
-memory-vault/
-├── data/                    # Your documents (markdown, txt, pdf)
-│   ├── docker_cheatsheet.md
-│   ├── python_api_project.md
-│   ├── AI Engineering.pdf
-│   └── ...
+Memory_Vault_Local/
 ├── src/
 │   ├── __init__.py
 │   ├── ingestion.py         # Document ingestion pipeline
+│   ├── local_rag_ollama.py  # 🆕 Ollama RAG entrypoint
 │   ├── watcher.py           # File system watcher
 │   └── server.py            # MCP server
+├── data/                    # Example documents
+├── venv/                    # Python virtual environment
 ├── requirements.txt
-├── README.md
-├── status.sh                # Check watcher status
-├── run_server.sh            # Start MCP server
-├── run_watcher.sh           # Start watcher manually
-└── com.local-mcp-kb.watcher.plist  # LaunchAgent configuration
+└── README.md
 
-# Database location: ~/.local-mcp-kb/chroma_db/ (auto-created in home directory)
+# Data source: C:\Notes (all subdirectories)
+# Database: C:\Users\<user>\.local-mcp-kb\chroma_db\
 ```
 
-## 🎓 Example Usage with Claude
+## 🦙 Ollama Setup
 
-After configuration, you can ask questions in Claude Desktop like:
+1. Install Ollama from https://ollama.ai
+2. Pull a model:
+```powershell
+ollama pull mistral-nemo:12b-instruct-2407-q4_K_M
+# Or any other model you prefer
+```
+3. Ollama runs automatically as a service on `localhost:11434`
 
-- "What are the main Docker commands?"
-- "How do I create a Python API?"
-- "Show me the Git cheatsheet"
-- "What are the best practices for pandas?"
+## 🎓 Example Queries
 
-Claude will automatically use the `query_knowledge_base` tool to retrieve relevant information from your local documents.
+After indexing your notes, you can ask:
 
-## 🔍 Available Tools
+- "Wat zijn de belangrijkste Docker commands?"
+- "Hoe maak ik een Python API?"
+- "Leg SQL JOINs uit"
+- "Wat zijn de Git best practices?"
+
+The system retrieves relevant chunks from your notes and generates contextual answers.
+
+## 🔍 Available MCP Tools
 
 ### query_knowledge_base
 Search the knowledge base using natural language.
-
-**Parameters:**
 - `query` (string, required): The search query
 - `n_results` (number, optional): Number of results (default: 5)
 
 ### get_knowledge_base_stats
-Get statistics about the knowledge base.
+Get statistics about the indexed documents.
 
 ### refresh_knowledge_base
-Re-index all documents in the `./data` directory.
+Re-index all documents in `C:\Notes`.
 
 ## 🛠️ Technical Stack
 
-- **Language:** Python 3.10+
+- **Language:** Python 3.12
 - **Protocol:** MCP (Model Context Protocol)
 - **Vector Database:** ChromaDB
-- **File Watcher:** watchdog
 - **Embeddings:** sentence-transformers (all-MiniLM-L6-v2)
+- **LLM:** Ollama (local, any model)
+- **File Watcher:** watchdog
 - **Text Splitting:** langchain-text-splitters
 - **PDF Processing:** pypdf
-
-## 📊 Watcher Service Management
-
-**Check status:**
-```bash
-./status.sh
-```
-
-**Stop watcher:**
-```bash
-launchctl unload ~/Library/LaunchAgents/com.local-mcp-kb.watcher.plist
-```
-
-**Start watcher:**
-```bash
-launchctl load ~/Library/LaunchAgents/com.local-mcp-kb.watcher.plist
-```
-
-**View logs:**
-```bash
-tail -f ~/.local-mcp-kb/watcher.log
-```
-
-## 🚀 Adding New Documents
-
-Simply copy new `.md`, `.txt`, or `.pdf` files to the `data/` directory. The watcher service will automatically detect and index them within 1-2 seconds!
-
-```bash
-cp ~/Downloads/new-book.pdf ./data/
-# Automatically indexed!
-```
 
 ## 📝 License
 
