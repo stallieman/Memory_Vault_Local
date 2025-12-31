@@ -1,0 +1,7 @@
+mcp
+chromadb
+watchdog
+langchain-text-splitters
+sentence-transformers
+pypdf
+requests
