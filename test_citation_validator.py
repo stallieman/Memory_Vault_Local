@@ -152,6 +152,94 @@ def main():
         should_pass=False
     ))
     
+    print(f"\n{'='*80}")
+    print("BLOCK-BASED COVERAGE TESTS")
+    print(f"{'='*80}")
+    
+    # TEST 12: Single citation only at top, then uncited text (should FAIL)
+    test_results.append(test_case(
+        name="Single citation at top only (coverage failure)",
+        text='''"SELECT customer_id" [chunk:a071ddb5f343_2]
+
+In deze query wordt eerst een CTE gemaakt. Vervolgens wordt een unieke nummering toegewezen.
+
+Wanneer je beter een CROSS APPLY zou kunnen gebruiken hangt af van factoren.''',
+        allowed_ids={'a071ddb5f343_2'},
+        should_pass=False,  # Multiple paragraphs without citations
+        require_quotes=False  # Don't require quotes for this test
+    ))
+    
+    # TEST 13: Each paragraph ends with citation (should PASS)
+    test_results.append(test_case(
+        name="Each paragraph cited (proper coverage)",
+        text='''"Docker containers zijn geïsoleerd" [chunk:docker_001]
+
+"Het `docker run` commando start een nieuwe container" [chunk:docker_002]
+
+"Volumes worden gebruikt voor data persistentie" [chunk:docker_003]''',
+        allowed_ids={'docker_001', 'docker_002', 'docker_003'},
+        should_pass=True
+    ))
+    
+    # TEST 14: Bullets without citations (should FAIL)
+    test_results.append(test_case(
+        name="Bullets without citations (coverage failure)",
+        text='''Belangrijke punten:
+
+- Docker is een containerization platform
+- Containers delen de kernel
+- Images zijn read-only templates
+
+"Dit is de uitleg" [chunk:docker_001]''',
+        allowed_ids={'docker_001'},
+        should_pass=False,  # Bullets have no citations
+        require_quotes=False
+    ))
+    
+    # TEST 15: Headers without citations are OK (should PASS)
+    test_results.append(test_case(
+        name="Headers without citations (exempt)",
+        text='''## Docker Basics
+
+"Docker containers zijn geïsoleerd" [chunk:docker_001]
+
+## Advanced Usage
+
+"Gebruik docker-compose voor multi-container setups" [chunk:docker_002]''',
+        allowed_ids={'docker_001', 'docker_002'},
+        should_pass=True
+    ))
+    
+    # TEST 16: Mixed content with proper coverage (should PASS)
+    test_results.append(test_case(
+        name="Mixed content with full coverage",
+        text='''## Introduction
+
+"Elasticsearch is een search engine" [chunk:elastic_001]
+
+- "Full-text search capabilities" [chunk:elastic_002]
+- "Distributed architecture" [chunk:elastic_003]
+
+"Het ondersteunt RESTful APIs" [chunk:elastic_004]''',
+        allowed_ids={'elastic_001', 'elastic_002', 'elastic_003', 'elastic_004'},
+        should_pass=True
+    ))
+    
+    # TEST 17: Numbered list without citations (should FAIL)
+    test_results.append(test_case(
+        name="Numbered list without citations (coverage failure)",
+        text='''Stappen om een index te maken:
+
+1. Definieer de mapping
+2. Stel de settings in
+3. Voer de PUT request uit
+
+"Dit zijn de basisstappen" [chunk:elastic_001]''',
+        allowed_ids={'elastic_001'},
+        should_pass=False,  # Numbered items have no citations
+        require_quotes=False
+    ))
+    
     # Summary
     print(f"\n{'='*80}")
     print("TEST SUMMARY")

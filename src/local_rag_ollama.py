@@ -176,6 +176,19 @@ def print_debug_bundle(debug_payload: dict) -> None:
     print(f"\n❌ Failure Reason:")
     print(f"   {debug_payload.get('reason', 'unknown')}")
     
+    # Show block coverage failures (if any)
+    uncited_blocks = debug_payload.get('uncited_blocks', [])
+    if uncited_blocks:
+        print(f"\n🚫 Uncited Blocks ({len(uncited_blocks)}):")
+        for block_info in uncited_blocks[:5]:
+            print(f"    Block #{block_info['index']} ({block_info['type']}):")
+            print(f"      \"{block_info['preview']}...\"")
+        if len(uncited_blocks) > 5:
+            print(f"    ... and {len(uncited_blocks) - 5} more uncited blocks")
+        total_blocks = debug_payload.get('total_blocks', 0)
+        if total_blocks:
+            print(f"    Total non-header blocks: {total_blocks}")
+    
     # Show found vs invalid citations
     found = debug_payload.get('found_citations', [])
     invalid = debug_payload.get('invalid_citations', [])
@@ -201,11 +214,103 @@ def print_debug_bundle(debug_payload: dict) -> None:
 
 
 # ============================================================================
-# STRICT Citation Validation (Fail-Fast) - FIXED VERSION
+# STRICT Citation Validation (Fail-Fast) - BLOCK-BASED COVERAGE
 # ============================================================================
 
 # Pattern for quoted text (various quote styles)
 QUOTE_PATTERN = re.compile(r'["""]([^"""]{10,})["""]')
+
+# Pattern to detect markdown headers
+HEADER_PATTERN = re.compile(r'^\s*#{1,6}\s+.+$')
+
+
+def split_into_blocks(text: str) -> List[Dict[str, str]]:
+    """
+    Split text into logical blocks: paragraphs, bullets, numbered items.
+    
+    Returns list of dicts with 'type' and 'content'.
+    Block types: 'paragraph', 'bullet', 'numbered', 'header'
+    """
+    blocks = []
+    lines = text.split('\n')
+    current_block = []
+    current_type = None
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Empty line = end current block
+        if not stripped:
+            if current_block:
+                blocks.append({
+                    'type': current_type or 'paragraph',
+                    'content': '\n'.join(current_block)
+                })
+                current_block = []
+                current_type = None
+            continue
+        
+        # Detect block type
+        is_header = HEADER_PATTERN.match(line)
+        is_bullet = stripped.startswith('- ') or stripped.startswith('* ')
+        is_numbered = bool(re.match(r'^\d+\.\s+', stripped))
+        
+        # Start new block if type changes
+        new_type = None
+        if is_header:
+            new_type = 'header'
+        elif is_bullet:
+            new_type = 'bullet'
+        elif is_numbered:
+            new_type = 'numbered'
+        else:
+            new_type = 'paragraph'
+        
+        # For bullets/numbered items: each item is its own block
+        if new_type in ('bullet', 'numbered'):
+            if current_block:
+                blocks.append({
+                    'type': current_type or 'paragraph',
+                    'content': '\n'.join(current_block)
+                })
+                current_block = []
+            blocks.append({
+                'type': new_type,
+                'content': line
+            })
+            current_type = None
+        else:
+            # Headers and paragraphs: accumulate until type changes
+            if current_type and current_type != new_type:
+                blocks.append({
+                    'type': current_type,
+                    'content': '\n'.join(current_block)
+                })
+                current_block = []
+            current_block.append(line)
+            current_type = new_type
+    
+    # Add final block
+    if current_block:
+        blocks.append({
+            'type': current_type or 'paragraph',
+            'content': '\n'.join(current_block)
+        })
+    
+    return blocks
+
+
+def block_has_trailing_citation(block_content: str) -> Tuple[bool, List[str]]:
+    """
+    Check if block ends with citation(s).
+    Returns (has_citation, list_of_citation_ids).
+    
+    "Trailing" = last 100 chars contain at least one [chunk:id].
+    """
+    # Check last 100 chars for citations
+    tail = block_content[-100:] if len(block_content) > 100 else block_content
+    citations = CITATION_PATTERN.findall(tail)
+    return bool(citations), citations
 
 
 def validate_answer(
@@ -215,18 +320,22 @@ def validate_answer(
     require_quotes: bool = True
 ) -> Set[str]:
     """
-    Validate that an answer contains proper citations.
+    Validate that an answer contains proper citations with BLOCK-BASED COVERAGE.
     
     FAIL-FAST: Raises CitationValidationError if validation fails.
     
     Validation Rules:
     1. IDK response is always valid (no citations required)
-    2. Must contain at least one valid [chunk:id] citation
+    2. Each non-header, non-empty block must END with at least one [chunk:id] citation
     3. All cited IDs must be from allowed_ids (no hallucinated chunks)
     4. Must NOT contain external URLs (http/https links)
-    5. Optionally require verbatim quotes (if require_quotes=True)
+    5. Optionally: each block with citations must contain quoted evidence (if require_quotes=True)
     
-    REMOVED: Generic word banning ("page", "chapter", etc.) - too restrictive
+    Block types checked:
+    - Paragraphs (text separated by blank lines)
+    - Bullet items ("- " or "* ")
+    - Numbered items ("1. ", "2. ", etc.)
+    - Headers (## Title) are exempt from citation requirement
     
     Args:
         text: The model's response text
@@ -243,31 +352,86 @@ def validate_answer(
     text_stripped = text.strip()
     
     # ACCEPT: Flexible IDK response (English or Dutch)
-    # Exact match for backward compatibility
-    if text_stripped == IDK:
+    if text_stripped == IDK or IDK_PATTERN.match(text_stripped):
         return set()  # No citations needed for IDK
     
-    # Flexible pattern match for variations
-    if IDK_PATTERN.match(text_stripped):
-        return set()  # No citations needed for IDK variants
+    # Split into blocks
+    blocks = split_into_blocks(text_stripped)
     
-    # Extract all citations
-    found_citations = set(CITATION_PATTERN.findall(text))
+    if not blocks:
+        debug_payload['reason'] = "Empty response"
+        debug_payload['model_output'] = text[:5000]
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError("Empty response", debug_payload)
     
-    # FAIL: No citations found
-    if not found_citations:
+    # Track validation state
+    all_citations_found = set()
+    uncited_blocks = []
+    blocks_with_quotes_but_no_citation = []
+    
+    for i, block in enumerate(blocks):
+        block_type = block['type']
+        content = block['content'].strip()
+        
+        # Skip empty blocks
+        if not content:
+            continue
+        
+        # Headers are exempt from citation requirement
+        if block_type == 'header':
+            continue
+        
+        # Check if block has trailing citation
+        has_citation, block_citations = block_has_trailing_citation(content)
+        
+        if not has_citation:
+            uncited_blocks.append({
+                'index': i,
+                'type': block_type,
+                'preview': content[:120]
+            })
+        else:
+            # Collect citations
+            all_citations_found.update(block_citations)
+            
+            # If require_quotes, check if block has quote
+            if require_quotes:
+                quotes = QUOTE_PATTERN.findall(content)
+                if not quotes:
+                    blocks_with_quotes_but_no_citation.append({
+                        'index': i,
+                        'type': block_type,
+                        'preview': content[:120]
+                    })
+    
+    # FAIL: Blocks without citations
+    if uncited_blocks:
+        debug_payload['reason'] = f"Citation coverage failure: {len(uncited_blocks)} block(s) without trailing citations"
+        debug_payload['model_output'] = text[:5000]
+        debug_payload['uncited_blocks'] = uncited_blocks
+        debug_payload['total_blocks'] = len([b for b in blocks if b['type'] != 'header' and b['content'].strip()])
+        debug_payload['found_citations'] = list(all_citations_found)
+        debug_payload['allowed_ids'] = list(allowed_ids)
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError(
+            f"Citation coverage failure: {len(uncited_blocks)} uncited blocks", 
+            debug_payload
+        )
+    
+    # FAIL: No citations found at all
+    if not all_citations_found:
         debug_payload['reason'] = "No citations found - answer must use [chunk:id] format"
-        debug_payload['model_output'] = text[:5000]  # Truncate
+        debug_payload['model_output'] = text[:5000]
         debug_payload['found_citations'] = set()
         print_debug_bundle(debug_payload)
         raise CitationValidationError("No citations found", debug_payload)
     
-    # FAIL: Unknown citation IDs (hallucinated chunks)
-    invalid_citations = found_citations - allowed_ids
+    # FAIL: Invalid citation IDs (hallucinated chunks)
+    invalid_citations = all_citations_found - allowed_ids
     if invalid_citations:
         debug_payload['reason'] = f"Invalid chunk IDs - not in allowed set: {invalid_citations}"
         debug_payload['model_output'] = text[:5000]
-        debug_payload['found_citations'] = list(found_citations)
+        debug_payload['found_citations'] = list(all_citations_found)
         debug_payload['invalid_citations'] = list(invalid_citations)
         print_debug_bundle(debug_payload)
         raise CitationValidationError(
@@ -276,31 +440,28 @@ def validate_answer(
         )
     
     # FAIL: External URLs detected (hallucination indicator)
-    url_matches = UNSUPPORTED_URL_PATTERN.findall(text)
+    url_matches = UNSUPPORTED_URL_PATTERN.findall(text_stripped)
     if url_matches:
         unique_urls = set(url_matches)
         debug_payload['reason'] = f"External URLs not allowed - answer must cite local chunks only: {unique_urls}"
         debug_payload['model_output'] = text[:5000]
-        debug_payload['found_citations'] = list(found_citations)
+        debug_payload['found_citations'] = list(all_citations_found)
         debug_payload['urls_found'] = list(unique_urls)
         print_debug_bundle(debug_payload)
         raise CitationValidationError(f"External URLs found: {unique_urls}", debug_payload)
     
-    # FAIL: No quotes found (evidence requirement)
-    if require_quotes:
-        quotes_found = QUOTE_PATTERN.findall(text)
-        if not quotes_found:
-            debug_payload['reason'] = "No verbatim quotes found - answer must include quoted evidence from sources"
-            debug_payload['model_output'] = text[:5000]
-            debug_payload['found_citations'] = list(found_citations)
-            debug_payload['quotes_found'] = 0
-            print_debug_bundle(debug_payload)
-            raise CitationValidationError("No quotes found - evidence required", debug_payload)
-        debug_payload['quotes_found'] = len(quotes_found)  # Just count, not full quotes
+    # FAIL: Blocks without quotes (if required)
+    if require_quotes and blocks_with_quotes_but_no_citation:
+        debug_payload['reason'] = "Quote requirement failure: blocks with citations but no quotes"
+        debug_payload['model_output'] = text[:5000]
+        debug_payload['blocks_without_quotes'] = blocks_with_quotes_but_no_citation
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError("No quotes found - evidence required", debug_payload)
     
     # SUCCESS: All validations passed
-    print(f"✅ Citation validation passed: {len(found_citations)} citations, {len(set(found_citations))} unique chunks")
-    return found_citations
+    cited_blocks = len([b for b in blocks if b['type'] != 'header' and b['content'].strip()])
+    print(f"✅ Citation validation passed: {len(all_citations_found)} citations, {cited_blocks} blocks covered, {len(set(all_citations_found))} unique chunks")
+    return all_citations_found
 
 
 # ============================================================================
