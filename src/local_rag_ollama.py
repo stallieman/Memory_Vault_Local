@@ -16,7 +16,7 @@ import os
 import re
 import sys
 import json
-import requests
+import requests  # type: ignore
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Set
 from ingestion import DocumentIngestion
@@ -27,8 +27,8 @@ from retrieval import PrioritizedRetriever, RAG_TOP_K_TOTAL, RAG_TOP_K_PER_GROUP
 # ============================================================================
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "rag-grounded-nemo")
-RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "6"))  # Increased to allow for TOC filtering
-RAG_TOP_K_FULL = int(os.environ.get("RAG_TOP_K_FULL", "3"))
+RAG_TOP_K = int(os.environ.get("RAG_TOP_K", "12"))  # Increased for better technical doc coverage
+RAG_TOP_K_FULL = int(os.environ.get("RAG_TOP_K_FULL", "6"))  # More full-text chunks
 RAG_MAX_CHARS_FULL = int(os.environ.get("RAG_MAX_CHARS_FULL", "4500"))
 RAG_SNIPPET_CHARS = int(os.environ.get("RAG_SNIPPET_CHARS", "400"))
 RAG_NUM_CTX = int(os.environ.get("RAG_NUM_CTX", "8192"))
@@ -39,7 +39,13 @@ RAG_PDF_EXPAND = os.environ.get("RAG_PDF_EXPAND", "1") == "1"
 RAG_PDF_EXPAND_RADIUS = int(os.environ.get("RAG_PDF_EXPAND_RADIUS", "2"))
 
 # Source diversity: max chunks per single source file
-RAG_MAX_PER_SOURCE = int(os.environ.get("RAG_MAX_PER_SOURCE", "3"))
+# Increased to 5 to allow more technical documentation from same source
+RAG_MAX_PER_SOURCE = int(os.environ.get("RAG_MAX_PER_SOURCE", "5"))
+
+# Minimum relevance score threshold (0-1 scale, where 1=perfect match)
+# Below this threshold, context is considered irrelevant and question is out-of-scope  
+# Lowered to 0.25 to accommodate semantic gap between natural questions and technical docs
+RAG_MIN_SCORE = float(os.environ.get("RAG_MIN_SCORE", "0.25"))
 
 # ============================================================================
 # STRICT CITATION ENFORCEMENT CONSTANTS
@@ -561,7 +567,9 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
     Returns (list_of_chunks, set_of_allowed_chunk_ids, diagnostics_dict).
     
     Features:
-    - Prioritized retrieval: Queries source_groups in priority order
+    - Universal search: Searches ALL source groups (sql, elastic, python, docker, git, ai, ebooks, etc.)
+    - Automatic fallback: If no specialized docs match, ebooks/misc serve as fallback
+    - Prioritized retrieval: Applies priority bonuses to favor domain-specific docs over general ebooks
     - TOC filtering: Excludes table-of-contents chunks
     - PDF chunk expansion: Fetches adjacent chunks for PDF sources
     - Source diversity: Max N chunks per source file
@@ -572,8 +580,8 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
     # Use prioritized retrieval to get diverse results across source_groups
     if use_prioritized:
         retriever = PrioritizedRetriever(kb)
-        # Fetch more than needed to account for TOC filtering
-        fetch_count = RAG_TOP_K * 2 if RAG_FILTER_TOC else RAG_TOP_K
+        # Fetch more than needed to account for TOC filtering and ensure good coverage
+        fetch_count = RAG_TOP_K * 3 if RAG_FILTER_TOC else RAG_TOP_K
         result = retriever.query_with_priority(
             query_text=question,
             top_k_total=fetch_count,
@@ -582,7 +590,7 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
         )
     else:
         # Fallback to simple query
-        fetch_count = RAG_TOP_K * 2 if RAG_FILTER_TOC else RAG_TOP_K
+        fetch_count = RAG_TOP_K * 3 if RAG_FILTER_TOC else RAG_TOP_K
         result = kb.query(question, n_results=fetch_count)
     
     diagnostics = {
@@ -655,6 +663,16 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
         dist = distances[i]
         chunk_id = ids[i]
         
+        # Calculate relevance score (1 - distance)
+        score = 1 - float(dist)
+        
+        # Skip chunks below minimum relevance threshold
+        if score < RAG_MIN_SCORE:
+            if "low_relevance_filtered" not in diagnostics:
+                diagnostics["low_relevance_filtered"] = 0
+            diagnostics["low_relevance_filtered"] += 1
+            continue
+        
         allowed_ids.add(chunk_id)
         
         # Track PDF sources for expansion
@@ -678,7 +696,7 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
             "text": text,
             "metadata": meta,
             "id": chunk_id,
-            "score": 1 - float(dist),
+            "score": score,
             "rank": rank
         })
     
@@ -913,6 +931,7 @@ def print_startup_banner(model: str, kb_stats: dict) -> None:
     print(f"   • Model:          {model}")
     print(f"   • Context size:   {RAG_NUM_CTX} tokens")
     print(f"   • Top-K chunks:   {RAG_TOP_K} (full text: {RAG_TOP_K_FULL})")
+    print(f"   • Min relevance:  {RAG_MIN_SCORE} (0-1 scale)")
     print(f"   • TOC filtering:  {'ENABLED' if RAG_FILTER_TOC else 'disabled'}")
     print(f"   • PDF expansion:  {'ENABLED (radius={})'.format(RAG_PDF_EXPAND_RADIUS) if RAG_PDF_EXPAND else 'disabled'}")
     print(f"   • Source diversity: max {RAG_MAX_PER_SOURCE} chunks per source")
@@ -996,6 +1015,8 @@ def main():
 
         # Show retrieval diagnostics
         print(f"✓ Retrieved {diagnostics['fetched']} candidates → {diagnostics['final_count']} chunks")
+        if diagnostics.get('low_relevance_filtered', 0) > 0:
+            print(f"  🔍 Filtered {diagnostics['low_relevance_filtered']} low-relevance chunks (score < {RAG_MIN_SCORE})")
         if diagnostics['toc_filtered'] > 0:
             print(f"  📄 Filtered {diagnostics['toc_filtered']} TOC-like chunks:")
             for toc_info in diagnostics['toc_reasons'][:3]:

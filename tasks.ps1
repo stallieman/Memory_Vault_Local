@@ -130,7 +130,7 @@ function Start-Reindex {
     Write-Host "Starting full re-ingest..." -ForegroundColor Green
     
     Push-Location $RepoRoot
-    & $VenvPython -c "import sys; sys.path.insert(0, 'src'); from ingestion import DocumentIngestion; ing = DocumentIngestion(); print('Clearing existing data...'); ing.collection.delete(where={}); print('Re-ingesting all files...'); ing.ingest_directory(); stats = ing.get_stats(); print('Complete! Total chunks:', stats['total_chunks'])"
+    & $VenvPython -c "import sys; sys.path.insert(0, 'src'); from ingestion import DocumentIngestion; ing = DocumentIngestion(); print('Clearing existing data...'); ing.client.delete_collection('knowledge_base'); ing.collection = ing.client.get_or_create_collection(name='knowledge_base', metadata={'description': 'Local knowledge base documents'}, embedding_function=ing.embedding_function); print('Re-ingesting all files...'); ing.ingest_directory(); stats = ing.get_stats(); print('Complete! Total chunks:', stats['total_chunks'])"
     Pop-Location
     
     Write-Host ""

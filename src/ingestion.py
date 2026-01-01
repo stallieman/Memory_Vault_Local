@@ -8,11 +8,11 @@ import hashlib
 import re
 from pathlib import Path
 from typing import List, Dict, Optional
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from pypdf import PdfReader
+import chromadb  # type: ignore
+from chromadb.config import Settings  # type: ignore
+from chromadb.utils import embedding_functions  # type: ignore
+from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
+from pypdf import PdfReader  # type: ignore
 
 
 # Mapping: top-level folder (lowercase) -> source_group

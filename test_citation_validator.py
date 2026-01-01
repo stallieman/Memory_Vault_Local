@@ -5,9 +5,10 @@ Tests the fixed validation logic that no longer bans generic words.
 """
 
 import sys
-sys.path.insert(0, "src")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from local_rag_ollama import validate_answer, CitationValidationError, IDK
+from local_rag_ollama import validate_answer, CitationValidationError, IDK  # type: ignore
 
 
 def test_case(name: str, text: str, allowed_ids: set, should_pass: bool, require_quotes: bool = True):

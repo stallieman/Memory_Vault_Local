@@ -23,16 +23,19 @@ from ingestion import DocumentIngestion
 # Configuration via environment variables
 # ============================================================================
 RAG_TOP_K_TOTAL = int(os.environ.get("RAG_TOP_K_TOTAL", "12"))
-RAG_TOP_K_PER_GROUP = int(os.environ.get("RAG_TOP_K_PER_GROUP", "3"))  # kept for API compat
-RAG_MAX_PER_SOURCE = int(os.environ.get("RAG_MAX_PER_SOURCE", "3"))  # max chunks per file
+# Increased from 3 to 12 to allow more chunks from same source_group when they're all relevant
+RAG_TOP_K_PER_GROUP = int(os.environ.get("RAG_TOP_K_PER_GROUP", "12"))
+RAG_MAX_PER_SOURCE = int(os.environ.get("RAG_MAX_PER_SOURCE", "5"))  # max chunks per file
 RAG_PREFLIGHT_MULT = int(os.environ.get("RAG_PREFLIGHT_MULT", "5"))  # fetch 5x candidates
 
 # Priority bonus per group (subtracted from distance - lower = better)
 # Higher bonus = more likely to be selected when relevance is similar
 # Specialized domains get higher bonus to compete with large ebook corpus
+# ALL source_groups are always searched - bonuses only affect ranking within top results
+# If no specialized docs match, ebooks will automatically be returned as fallback
 GROUP_PRIORITY_BONUS = {
     "sql":       0.15,  # Strong bias for local SQL docs
-    "tdv":       0.15,  # Strong bias for TDV docs
+    "tdv":       0.15,  # Strong bias for TDV docs  
     "elastic":   0.15,  # Strong bias for Elastic docs
     "python":    0.10,
     "docker":    0.10,
@@ -41,7 +44,7 @@ GROUP_PRIORITY_BONUS = {
     "microsoft": 0.06,
     "tools":     0.05,
     "personal":  0.04,
-    "ebooks":    0.00,  # No bonus - must win on pure relevance
+    "ebooks":    0.00,  # No bonus - automatic fallback when no specialized docs match
     "misc":      0.00,
 }
 

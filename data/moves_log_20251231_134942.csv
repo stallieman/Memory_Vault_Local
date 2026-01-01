@@ -1,0 +1,36 @@
+action,from,to,source_group
+moved,C:\Notes\CV_Marco_Stalman.docx,C:\Notes\personal\cv\CV_Marco_Stalman.docx,personal
+moved,C:\Notes\CV_Marco_Stalman_nieuw.docx,C:\Notes\personal\cv\CV_Marco_Stalman_nieuw.docx,personal
+moved,C:\Notes\devtools_cheatsheet.md,C:\Notes\tools\devtools\devtools_cheatsheet.md,tools
+moved,C:\Notes\docker_cheatsheet.md,C:\Notes\docker\docker_cheatsheet.md,docker
+moved,C:\Notes\docker_compose_cheatsheet.md,C:\Notes\docker\docker_compose_cheatsheet.md,docker
+moved,C:\Notes\DP-900.md,C:\Notes\microsoft\certs\DP-900.md,microsoft
+moved,C:\Notes\geoip_logstash.md,C:\Notes\elastic\geoip_logstash.md,elastic
+moved,C:\Notes\git-details--2025-12-28.md,C:\Notes\git\git-details--2025-12-28.md,git
+moved,C:\Notes\git_cheatsheet.md,C:\Notes\git\git_cheatsheet.md,git
+moved,C:\Notes\howto-scipt-and-sp--2025-12-29.md,C:\Notes\tdv\howto-scipt-and-sp--2025-12-29.md,tdv
+moved,C:\Notes\KEYBINDINGS 2.md,C:\Notes\tools\misc\KEYBINDINGS 2.md,tools
+moved,C:\Notes\KEYBINDINGS.md,C:\Notes\tools\misc\KEYBINDINGS.md,tools
+moved,C:\Notes\KEYMAPS.md,C:\Notes\tools\misc\KEYMAPS.md,tools
+moved,C:\Notes\linux_cheatsheet.md,C:\Notes\tools\linux\linux_cheatsheet.md,tools
+moved,C:\Notes\logstash_cheatsheet.md,C:\Notes\elastic\logstash_cheatsheet.md,elastic
+moved,C:\Notes\Marco_Stalman_CV.pdf,C:\Notes\personal\cv\Marco_Stalman_CV.pdf,personal
+moved,C:\Notes\nvim_cheatsheet.md,C:\Notes\tools\nvim\nvim_cheatsheet.md,tools
+moved,C:\Notes\pandas.md,C:\Notes\python\pandas.md,python
+moved,C:\Notes\pandas_cheatsheet.md,C:\Notes\python\pandas_cheatsheet.md,python
+moved,C:\Notes\Power BI.md,C:\Notes\microsoft\powerbi\Power BI.md,microsoft
+moved,C:\Notes\pr-git-info--2025-12-28.md,C:\Notes\git\pr-git-info--2025-12-28.md,git
+moved,C:\Notes\python_api_project.md,C:\Notes\python\python_api_project.md,python
+moved,C:\Notes\python_filehandling.md,C:\Notes\python\python_filehandling.md,python
+moved,C:\Notes\SQL CTE en JOINS uitleg.md,C:\Notes\sql\SQL CTE en JOINS uitleg.md,sql
+moved,C:\Notes\SQL.rtf,C:\Notes\sql\SQL.rtf,sql
+moved,C:\Notes\sql_advanced.md,C:\Notes\sql\sql_advanced.md,sql
+moved,C:\Notes\sql_cheatsheet.md,C:\Notes\sql\sql_cheatsheet.md,sql
+moved,C:\Notes\stappenplan-ai-engineer--2025-12-28.md,C:\Notes\ai\stappenplan-ai-engineer--2025-12-28.md,ai
+moved,C:\Notes\troubleshooting_elastic.md,C:\Notes\elastic\troubleshooting_elastic.md,elastic
+moved,C:\Notes\vim_lazyvim_cheatsheet.pdf,C:\Notes\tools\vim\vim_lazyvim_cheatsheet.pdf,tools
+moved,C:\Notes\vim_lazyvim_cheatsheet_compact.pdf,C:\Notes\tools\vim\vim_lazyvim_cheatsheet_compact.pdf,tools
+moved,C:\Notes\vim_motions.md,C:\Notes\tools\vim\vim_motions.md,tools
+moved,C:\Notes\Readwise\Books\Cold Case Kennedy.md,C:\Notes\misc\readwise\Cold Case Kennedy.md,misc
+moved,C:\Notes\Readwise\Books\Data Modeling with Microsoft Power BI.md,C:\Notes\microsoft\powerbi\Data Modeling with Microsoft Power BI.md,microsoft
+moved,C:\Notes\Readwise\Books\Deep Work.md,C:\Notes\misc\readwise\Deep Work.md,misc
