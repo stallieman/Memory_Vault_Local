@@ -323,7 +323,8 @@ def validate_answer(
     text: str,
     allowed_ids: Set[str],
     debug_payload: dict,
-    require_quotes: bool = True
+    require_quotes: bool = True,
+    lenient_mode: bool = False
 ) -> Set[str]:
     """
     Validate that an answer contains proper citations with BLOCK-BASED COVERAGE.
@@ -333,6 +334,7 @@ def validate_answer(
     Validation Rules:
     1. IDK response is always valid (no citations required)
     2. Each non-header, non-empty block must END with at least one [chunk:id] citation
+       (In lenient_mode: at least 50% of blocks must have citations)
     3. All cited IDs must be from allowed_ids (no hallucinated chunks)
     4. Must NOT contain external URLs (http/https links)
     5. Optionally: each block with citations must contain quoted evidence (if require_quotes=True)
@@ -348,6 +350,7 @@ def validate_answer(
         allowed_ids: Set of valid chunk IDs from the context
         debug_payload: Dict with debug info (model, user_prompt, etc.)
         require_quotes: Whether to require quoted passages (default True)
+        lenient_mode: If True, allow some blocks without citations (for teaching-style answers)
     
     Returns:
         Set of valid citation IDs found (only if validation passes)
@@ -373,6 +376,7 @@ def validate_answer(
     # Track validation state
     all_citations_found = set()
     uncited_blocks = []
+    cited_blocks_count = 0
     blocks_with_quotes_but_no_citation = []
     
     for i, block in enumerate(blocks):
@@ -397,6 +401,9 @@ def validate_answer(
                 'preview': content[:120]
             })
         else:
+            # Count cited blocks
+            cited_blocks_count += 1
+            
             # Collect citations
             all_citations_found.update(block_citations)
             
@@ -409,20 +416,6 @@ def validate_answer(
                         'type': block_type,
                         'preview': content[:120]
                     })
-    
-    # FAIL: Blocks without citations
-    if uncited_blocks:
-        debug_payload['reason'] = f"Citation coverage failure: {len(uncited_blocks)} block(s) without trailing citations"
-        debug_payload['model_output'] = text[:5000]
-        debug_payload['uncited_blocks'] = uncited_blocks
-        debug_payload['total_blocks'] = len([b for b in blocks if b['type'] != 'header' and b['content'].strip()])
-        debug_payload['found_citations'] = list(all_citations_found)
-        debug_payload['allowed_ids'] = list(allowed_ids)
-        print_debug_bundle(debug_payload)
-        raise CitationValidationError(
-            f"Citation coverage failure: {len(uncited_blocks)} uncited blocks", 
-            debug_payload
-        )
     
     # FAIL: No citations found at all
     if not all_citations_found:
@@ -464,9 +457,33 @@ def validate_answer(
         print_debug_bundle(debug_payload)
         raise CitationValidationError("No quotes found - evidence required", debug_payload)
     
+    # FAIL: Block coverage check (strict mode: ALL blocks must be cited)
+    # In lenient_mode: at least 50% of blocks must have citations
+    if uncited_blocks:
+        total_blocks = len(uncited_blocks) + cited_blocks_count
+        cited_percentage = cited_blocks_count / total_blocks if total_blocks > 0 else 0
+        
+        # Lenient mode: allow up to 50% uncited blocks if we have at least 2 cited blocks
+        if lenient_mode and cited_blocks_count >= 2 and cited_percentage >= 0.5:
+            print(f"[VALIDATION] Lenient mode: Accepted with {cited_percentage:.0%} blocks cited ({cited_blocks_count}/{total_blocks} blocks, {len(all_citations_found)} unique citations)")
+            return all_citations_found
+        
+        # Strict mode: fail on ANY uncited blocks
+        debug_payload['reason'] = f"Citation coverage failure: {len(uncited_blocks)} uncited blocks out of {total_blocks} total"
+        debug_payload['model_output'] = text[:5000]
+        debug_payload['found_citations'] = list(all_citations_found)
+        debug_payload['uncited_blocks'] = uncited_blocks
+        debug_payload['cited_blocks_count'] = cited_blocks_count
+        debug_payload['total_blocks'] = total_blocks
+        debug_payload['cited_percentage'] = f"{cited_percentage:.0%}"
+        print_debug_bundle(debug_payload)
+        raise CitationValidationError(
+            f"Citation coverage failure: {len(uncited_blocks)} uncited blocks out of {total_blocks}",
+            debug_payload
+        )
+    
     # SUCCESS: All validations passed
-    cited_blocks = len([b for b in blocks if b['type'] != 'header' and b['content'].strip()])
-    print(f"✅ Citation validation passed: {len(all_citations_found)} citations, {cited_blocks} blocks covered, {len(set(all_citations_found))} unique chunks")
+    print(f"✅ Citation validation passed: {cited_blocks_count} blocks cited, {len(all_citations_found)} unique citations")
     return all_citations_found
 
 
@@ -806,7 +823,8 @@ def ask_with_strict_validation(
     question: str,
     context_chunks: List[Dict],
     allowed_ids: Set[str],
-    model: str
+    model: str,
+    lenient_mode: bool = False
 ) -> Tuple[str, Set[str]]:
     """
     Ask the question with context and STRICTLY validate citations + quotes.
@@ -819,6 +837,7 @@ def ask_with_strict_validation(
         context_chunks: Retrieved context chunks
         allowed_ids: Set of valid chunk IDs
         model: Ollama model name
+        lenient_mode: If True, allow up to 50% uncited blocks (for teaching-style answers)
     
     Returns:
         Tuple of (validated_answer, used_citations)
@@ -869,7 +888,10 @@ QUESTION: {question}"""
     
     # First try: lenient validation (no quote requirement yet)
     try:
-        used_citations = validate_answer(answer, allowed_ids, debug_payload.copy(), require_quotes=False)
+        used_citations = validate_answer(
+            answer, allowed_ids, debug_payload.copy(), 
+            require_quotes=False, lenient_mode=lenient_mode
+        )
         # Check if quotes exist even without requirement
         quotes_found = QUOTE_PATTERN.findall(answer)
         if quotes_found:
@@ -912,7 +934,10 @@ QUESTION: {question}"""
     
     # ========== VALIDATE RETRY (FAIL-FAST with quotes required) ==========
     # This will raise CitationValidationError if invalid
-    used_citations = validate_answer(answer2, allowed_ids, debug_payload, require_quotes=True)
+    used_citations = validate_answer(
+        answer2, allowed_ids, debug_payload, 
+        require_quotes=True, lenient_mode=lenient_mode
+    )
     
     return answer2, used_citations  # SUCCESS on retry
 

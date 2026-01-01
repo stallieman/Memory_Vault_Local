@@ -415,9 +415,10 @@ class RAGApp(ctk.CTk):
                 # Show sources
                 self.response_queue.put(("sources", (context_chunks, diagnostics)))
                 
-                # Get answer
+                # Get answer (use lenient mode for GUI - allows teaching-style answers)
                 answer, citations = ask_with_strict_validation(
-                    question, context_chunks, allowed_ids, self.effective_model
+                    question, context_chunks, allowed_ids, self.effective_model,
+                    lenient_mode=True
                 )
                 
                 self.response_queue.put(("answer", (answer, citations)))
