@@ -790,6 +790,9 @@ def retrieve_context(kb: DocumentIngestion, question: str, use_prioritized: bool
             adjacent = get_adjacent_chunk_ids(pdf_id, RAG_PDF_EXPAND_RADIUS)
             expansion_ids.extend([aid for aid in adjacent if aid not in allowed_ids])
         
+        # Deduplicate expansion IDs before fetching
+        expansion_ids = list(set(expansion_ids))
+        
         if expansion_ids:
             # Fetch adjacent chunks from database
             try:
@@ -922,25 +925,38 @@ def ask_with_strict_validation(
 ALLOWED CHUNK IDS: {allowed_ids_str}
 
 CRITICAL RULES - YOU MUST FOLLOW EXACTLY:
-1. ALWAYS provide evidence: either "quoted text" OR code blocks with ```
-2. IMMEDIATELY follow each piece of evidence with [chunk:<id>] citation
-3. ONLY use chunk IDs from the ALLOWED list above
-4. If the context does NOT contain the answer, respond EXACTLY: {IDK}
+1. Use ONLY information from the CONTEXT above - never invent or create new examples
+2. ALWAYS provide evidence: either "quoted text" OR code blocks with ```
+3. IMMEDIATELY follow each piece of evidence with [chunk:<id>] citation
+4. ONLY use chunk IDs from the ALLOWED list above
+5. If the context does NOT contain the answer, respond EXACTLY: {IDK}
+
+When user asks for "example", "dummy", or "template":
+- Use the example/template FROM THE CONTEXT (cite it!)
+- You can adapt field values if asked, but cite where the structure comes from
 
 MANDATORY FORMAT FOR EVERY STATEMENT:
 For text: "exact verbatim text from the source" [chunk:abc123_0001]
-For code: Use markdown code blocks followed by citation
+For code: Use markdown code blocks followed by citation AFTER the closing ```
+
+CRITICAL: Citations MUST be AFTER the code block, NEVER inside it!
 
 EXAMPLES:
 
 WRONG (NO EVIDENCE):
 Use PUT _index_template to create templates [chunk:abc123_0001]
 
+WRONG (CITATION INSIDE CODE):
+```python
+# Import from context [chunk:abc123_0001]
+df = pd.read_csv('file.csv')
+```
+
 CORRECT (WITH QUOTE):
 To create an index template, use "PUT _index_template/my-template" [chunk:abc123_0001]
 
-CORRECT (WITH CODE BLOCK):
-To create an index template with settings:
+CORRECT (WITH CODE BLOCK - citation AFTER closing ```):
+To create an index template:
 ```json
 PUT _index_template/my-template
 {{
@@ -948,6 +964,12 @@ PUT _index_template/my-template
   "template": {{
     "settings": {{
       "number_of_shards": 2
+    }},
+    "mappings": {{
+      "properties": {{
+        "timestamp": {{ "type": "date" }},
+        "message": {{ "type": "text" }}
+      }}
     }}
   }}
 }}
@@ -997,14 +1019,20 @@ QUESTION: {question}"""
     first_failure_reason = debug_payload.get('reason', 'missing evidence')
     retry_prompt = f"""❌ YOUR ANSWER WAS REJECTED: {first_failure_reason}
 
-YOU MUST PROVIDE EVIDENCE - EITHER QUOTES OR CODE BLOCKS!
+YOU MUST PROVIDE EVIDENCE FROM THE CONTEXT - NEVER CREATE NEW CONTENT!
 
 MANDATORY RULES:
 1. For descriptions: Use "quoted text" from the context
-2. For API calls/code: Use markdown code blocks ```json``` or ```
+2. For API calls/code: Use markdown code blocks ``` from the context
 3. Put [chunk:<id>] citation RIGHT AFTER each piece of evidence
 4. Use ONLY these IDs: {allowed_ids_str}
 5. If context doesn't have the answer: {IDK}
+
+EVEN IF USER ASKS FOR "DUMMY" OR "EXAMPLE":
+- Find the example/template IN THE CONTEXT
+- Show it in a code block
+- CITE where it came from with [chunk:id]
+- You can modify field names/values slightly, but MUST cite the source structure
 
 EXAMPLE OF CORRECT ANSWER:
 
@@ -1033,7 +1061,7 @@ PUT _index_template/my-template
 
 QUESTION: {question}
 
-ANSWER WITH EVIDENCE (quotes or code):"""
+ANSWER WITH EVIDENCE (quotes or code) AND CITATIONS:"""
 
     messages.append({"role": "assistant", "content": answer})
     messages.append({"role": "user", "content": retry_prompt})
