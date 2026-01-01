@@ -8,8 +8,8 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from ingestion import DocumentIngestion
-from local_rag_ollama import (
+from ingestion import DocumentIngestion  # type: ignore
+from local_rag_ollama import (  # type: ignore
     check_ollama_connection, get_effective_model,
     retrieve_context, ask_with_strict_validation,
     CitationValidationError
