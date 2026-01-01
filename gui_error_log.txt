@@ -1,0 +1,19 @@
+
+================================================================================
+Error at: 2026-01-01 16:23:53
+================================================================================
+Error: 'font' option forbidden, because would be incompatible with scaling
+
+Traceback (most recent call last):
+  File "C:\Projecten\memory-vault-main\memory-vault-main\launch_gui_debug.py", line 21, in <module>
+    app = RAGApp()
+          ^^^^^^^^
+  File "C:\Projecten\memory-vault-main\memory-vault-main\src\rag_gui.py", line 81, in __init__
+    self._configure_chat_tags()
+  File "C:\Projecten\memory-vault-main\memory-vault-main\src\rag_gui.py", line 498, in _configure_chat_tags
+    self.chat_textbox.tag_config("question", foreground=COLORS["primary"], font=ctk.CTkFont(size=13, weight="bold"))
+  File "C:\Projecten\memory-vault-main\memory-vault-main\venv\Lib\site-packages\customtkinter\windows\widgets\ctk_textbox.py", line 442, in tag_config
+    raise AttributeError("'font' option forbidden, because would be incompatible with scaling")
+AttributeError: 'font' option forbidden, because would be incompatible with scaling
+
+================================================================================

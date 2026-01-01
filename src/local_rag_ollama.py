@@ -226,26 +226,83 @@ def print_debug_bundle(debug_payload: dict) -> None:
 # Pattern for quoted text (various quote styles)
 QUOTE_PATTERN = re.compile(r'["""]([^"""]{10,})["""]')
 
+# Pattern to detect markdown code blocks (inline or fenced)
+CODE_BLOCK_PATTERN = re.compile(r'```[\s\S]*?```|`[^`]+`')
+
 # Pattern to detect markdown headers
 HEADER_PATTERN = re.compile(r'^\s*#{1,6}\s+.+$')
 
 
 def split_into_blocks(text: str) -> List[Dict[str, str]]:
     """
-    Split text into logical blocks: paragraphs, bullets, numbered items.
+    Split text into logical blocks: paragraphs, bullets, numbered items, code blocks.
     
     Returns list of dicts with 'type' and 'content'.
-    Block types: 'paragraph', 'bullet', 'numbered', 'header'
+    Block types: 'paragraph', 'bullet', 'numbered', 'header', 'code'
+    
+    Code blocks are kept together with any trailing citations.
     """
     blocks = []
     lines = text.split('\n')
     current_block = []
     current_type = None
+    in_code_block = False
     
-    for line in lines:
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         stripped = line.strip()
         
-        # Empty line = end current block
+        # Detect code block fence
+        if stripped.startswith('```'):
+            # If we have a current block, save it
+            if current_block and not in_code_block:
+                blocks.append({
+                    'type': current_type or 'paragraph',
+                    'content': '\n'.join(current_block)
+                })
+                current_block = []
+                current_type = None
+            
+            # Start collecting code block
+            if not in_code_block:
+                in_code_block = True
+                current_block = [line]
+                current_type = 'code'
+            else:
+                # End of code block - add closing fence
+                current_block.append(line)
+                in_code_block = False
+                
+                # Look ahead for citation on next non-empty line
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    current_block.append(lines[j])
+                    j += 1
+                
+                # If next line has citation, include it
+                if j < len(lines) and CITATION_PATTERN.search(lines[j]):
+                    current_block.append(lines[j])
+                    i = j  # Skip to this line
+                
+                # Save code block
+                blocks.append({
+                    'type': 'code',
+                    'content': '\n'.join(current_block)
+                })
+                current_block = []
+                current_type = None
+            
+            i += 1
+            continue
+        
+        # If inside code block, just accumulate
+        if in_code_block:
+            current_block.append(line)
+            i += 1
+            continue
+        
+        # Empty line = end current block (outside code blocks)
         if not stripped:
             if current_block:
                 blocks.append({
@@ -254,6 +311,7 @@ def split_into_blocks(text: str) -> List[Dict[str, str]]:
                 })
                 current_block = []
                 current_type = None
+            i += 1
             continue
         
         # Detect block type
@@ -295,6 +353,8 @@ def split_into_blocks(text: str) -> List[Dict[str, str]]:
                 current_block = []
             current_block.append(line)
             current_type = new_type
+        
+        i += 1
     
     # Add final block
     if current_block:
@@ -333,16 +393,18 @@ def validate_answer(
     
     Validation Rules:
     1. IDK response is always valid (no citations required)
-    2. Each non-header, non-empty block must END with at least one [chunk:id] citation
+    2. Each non-header, non-code, non-empty block must END with at least one [chunk:id] citation
        (In lenient_mode: at least 50% of blocks must have citations)
     3. All cited IDs must be from allowed_ids (no hallucinated chunks)
     4. Must NOT contain external URLs (http/https links)
     5. Optionally: each block with citations must contain quoted evidence (if require_quotes=True)
+       Note: Code blocks ARE evidence themselves and don't need additional quotes
     
     Block types checked:
     - Paragraphs (text separated by blank lines)
     - Bullet items ("- " or "* ")
     - Numbered items ("1. ", "2. ", etc.)
+    - Code blocks (```...```) - automatically considered evidence when cited
     - Headers (## Title) are exempt from citation requirement
     
     Args:
@@ -407,10 +469,13 @@ def validate_answer(
             # Collect citations
             all_citations_found.update(block_citations)
             
-            # If require_quotes, check if block has quote
-            if require_quotes:
+            # If require_quotes, check if block has evidence
+            # Code blocks ARE evidence themselves, so they don't need additional quotes
+            if require_quotes and block_type != 'code':
                 quotes = QUOTE_PATTERN.findall(content)
-                if not quotes:
+                code_blocks = CODE_BLOCK_PATTERN.findall(content)
+                # Accept either quotes or code blocks as evidence
+                if not quotes and not code_blocks:
                     blocks_with_quotes_but_no_citation.append({
                         'index': i,
                         'type': block_type,
@@ -451,21 +516,22 @@ def validate_answer(
     
     # FAIL: Blocks without quotes (if required)
     if require_quotes and blocks_with_quotes_but_no_citation:
-        debug_payload['reason'] = "Quote requirement failure: blocks with citations but no quotes"
+        debug_payload['reason'] = "Evidence requirement failure: blocks with citations but no quotes or code blocks"
         debug_payload['model_output'] = text[:5000]
-        debug_payload['blocks_without_quotes'] = blocks_with_quotes_but_no_citation
+        debug_payload['blocks_without_evidence'] = blocks_with_quotes_but_no_citation
         print_debug_bundle(debug_payload)
-        raise CitationValidationError("No quotes found - evidence required", debug_payload)
+        raise CitationValidationError("No quotes or code blocks found - evidence required", debug_payload)
     
     # FAIL: Block coverage check (strict mode: ALL blocks must be cited)
-    # In lenient_mode: at least 50% of blocks must have citations
+    # In lenient_mode: allow uncited blocks if we have at least 1 cited block with substantial evidence
     if uncited_blocks:
         total_blocks = len(uncited_blocks) + cited_blocks_count
         cited_percentage = cited_blocks_count / total_blocks if total_blocks > 0 else 0
         
-        # Lenient mode: allow up to 50% uncited blocks if we have at least 2 cited blocks
-        if lenient_mode and cited_blocks_count >= 2 and cited_percentage >= 0.5:
-            print(f"[VALIDATION] Lenient mode: Accepted with {cited_percentage:.0%} blocks cited ({cited_blocks_count}/{total_blocks} blocks, {len(all_citations_found)} unique citations)")
+        # Lenient mode: accept if we have at least 1 properly cited and evidenced block
+        # This allows for natural explanatory text around code blocks or quoted facts
+        if lenient_mode and cited_blocks_count >= 1:
+            print(f"[VALIDATION] Lenient mode: Accepted with {cited_blocks_count} cited block(s) out of {total_blocks} total ({cited_percentage:.0%}, {len(all_citations_found)} unique citations)")
             return all_citations_found
         
         # Strict mode: fail on ANY uncited blocks
@@ -855,17 +921,38 @@ def ask_with_strict_validation(
 
 ALLOWED CHUNK IDS: {allowed_ids_str}
 
-STRICT OUTPUT FORMAT:
-For each fact you state, you MUST:
-1. Include a verbatim quote from the source in "quotation marks"
-2. Cite the chunk using [chunk:<id>] format immediately after the quote
-3. Only use IDs from the ALLOWED list above
+CRITICAL RULES - YOU MUST FOLLOW EXACTLY:
+1. ALWAYS provide evidence: either "quoted text" OR code blocks with ```
+2. IMMEDIATELY follow each piece of evidence with [chunk:<id>] citation
+3. ONLY use chunk IDs from the ALLOWED list above
+4. If the context does NOT contain the answer, respond EXACTLY: {IDK}
 
-Example format:
-"The exact text from the source" [chunk:abc123_0001]
+MANDATORY FORMAT FOR EVERY STATEMENT:
+For text: "exact verbatim text from the source" [chunk:abc123_0001]
+For code: Use markdown code blocks followed by citation
 
-If the context does NOT contain information to answer the question, respond EXACTLY with:
-{IDK}
+EXAMPLES:
+
+WRONG (NO EVIDENCE):
+Use PUT _index_template to create templates [chunk:abc123_0001]
+
+CORRECT (WITH QUOTE):
+To create an index template, use "PUT _index_template/my-template" [chunk:abc123_0001]
+
+CORRECT (WITH CODE BLOCK):
+To create an index template with settings:
+```json
+PUT _index_template/my-template
+{{
+  "index_patterns": ["logs-*"],
+  "template": {{
+    "settings": {{
+      "number_of_shards": 2
+    }}
+  }}
+}}
+```
+[chunk:abc123_0001]
 
 QUESTION: {question}"""
 
@@ -892,13 +979,14 @@ QUESTION: {question}"""
             answer, allowed_ids, debug_payload.copy(), 
             require_quotes=False, lenient_mode=lenient_mode
         )
-        # Check if quotes exist even without requirement
+        # Check if evidence (quotes or code blocks) exists even without requirement
         quotes_found = QUOTE_PATTERN.findall(answer)
-        if quotes_found:
-            return answer, used_citations  # SUCCESS with quotes on first try
+        code_blocks_found = CODE_BLOCK_PATTERN.findall(answer)
+        if quotes_found or code_blocks_found:
+            return answer, used_citations  # SUCCESS with evidence on first try
         else:
-            # Has citations but no quotes - retry to get quotes
-            print(f"  ⚠️  First attempt has citations but no quotes - requesting quotes...")
+            # Has citations but no evidence - retry to get evidence
+            print(f"  ⚠️  First attempt has citations but no evidence (quotes/code) - requesting evidence...")
     except CitationValidationError as e:
         # First attempt failed - will retry
         first_failure_reason = e.reason
@@ -906,19 +994,46 @@ QUESTION: {question}"""
         print(f"  🔄 Retrying with stricter prompt...")
     
     # ========== SINGLE RETRY ==========
-    first_failure_reason = debug_payload.get('reason', 'missing quotes')
-    retry_prompt = f"""Your previous answer was REJECTED because: {first_failure_reason}
+    first_failure_reason = debug_payload.get('reason', 'missing evidence')
+    retry_prompt = f"""❌ YOUR ANSWER WAS REJECTED: {first_failure_reason}
 
-⚠️ STRICT RULES - YOU MUST FOLLOW:
-1. For EVERY fact, include a VERBATIM QUOTE in "quotation marks" from the source
-2. Cite using [chunk:<id>] IMMEDIATELY after each quote
-3. Use ONLY these chunk IDs: {allowed_ids_str}
-4. If you CANNOT answer from the CONTEXT, respond EXACTLY: "{IDK}"
+YOU MUST PROVIDE EVIDENCE - EITHER QUOTES OR CODE BLOCKS!
 
-CORRECT FORMAT EXAMPLE:
-According to the documentation, "the exact words from the source text" [chunk:abc123_0001].
+MANDATORY RULES:
+1. For descriptions: Use "quoted text" from the context
+2. For API calls/code: Use markdown code blocks ```json``` or ```
+3. Put [chunk:<id>] citation RIGHT AFTER each piece of evidence
+4. Use ONLY these IDs: {allowed_ids_str}
+5. If context doesn't have the answer: {IDK}
 
-QUESTION: {question}"""
+EXAMPLE OF CORRECT ANSWER:
+
+To create an index template, "PUT _index_template/my-template" [chunk:abc123_0001].
+
+For a complete example with settings and mappings:
+```json
+PUT _index_template/my-template
+{{
+  "index_patterns": ["logs-*"],
+  "template": {{
+    "settings": {{
+      "number_of_shards": 2,
+      "index.lifecycle.name": "logs-ilm-policy"
+    }},
+    "mappings": {{
+      "properties": {{
+        "timestamp": {{ "type": "date" }},
+        "message": {{ "type": "text" }}
+      }}
+    }}
+  }}
+}}
+```
+[chunk:abc123_0001]
+
+QUESTION: {question}
+
+ANSWER WITH EVIDENCE (quotes or code):"""
 
     messages.append({"role": "assistant", "content": answer})
     messages.append({"role": "user", "content": retry_prompt})

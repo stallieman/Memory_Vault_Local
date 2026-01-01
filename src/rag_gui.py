@@ -495,10 +495,10 @@ class RAGApp(ctk.CTk):
     def _configure_chat_tags(self):
         """Configure color tags for chat messages."""
         self.chat_textbox.tag_config("system", foreground=COLORS["secondary"])
-        self.chat_textbox.tag_config("question", foreground=COLORS["primary"], font=ctk.CTkFont(size=13, weight="bold"))
+        self.chat_textbox.tag_config("question", foreground=COLORS["primary"])
         self.chat_textbox.tag_config("answer", foreground=COLORS["text_primary"])
-        self.chat_textbox.tag_config("citations", foreground=COLORS["success"], font=ctk.CTkFont(size=11))
-        self.chat_textbox.tag_config("error", foreground=COLORS["danger"], font=ctk.CTkFont(size=13))
+        self.chat_textbox.tag_config("citations", foreground=COLORS["success"])
+        self.chat_textbox.tag_config("error", foreground=COLORS["danger"])
     
     def _append_system_message(self, message: str):
         """Add a system message."""
