@@ -14,8 +14,8 @@ from typing import Optional, Set, List, Dict, Tuple
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-import customtkinter as ctk
-from CTkMessagebox import CTkMessagebox
+import customtkinter as ctk  # type: ignore
+from CTkMessagebox import CTkMessagebox  # type: ignore
 
 # Import RAG components
 from ingestion import DocumentIngestion
@@ -32,8 +32,24 @@ from local_rag_ollama import (
 # ============================================================================
 # App Configuration
 # ============================================================================
-ctk.set_appearance_mode("dark")
+ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
+
+# Professional Light Mode Color Scheme
+COLORS = {
+    "primary": "#2563eb",      # Royal Blue
+    "primary_hover": "#1d4ed8",
+    "secondary": "#059669",    # Emerald Green
+    "success": "#10b981",      # Green
+    "warning": "#f59e0b",      # Amber
+    "danger": "#ef4444",       # Red
+    "bg_light": "#f8fafc",     # Very light gray
+    "bg_card": "#ffffff",      # White
+    "text_primary": "#1e293b", # Dark slate
+    "text_secondary": "#64748b", # Medium gray
+    "border": "#e2e8f0",       # Light border
+    "accent": "#8b5cf6"        # Purple
+}
 
 APP_TITLE = "Memory Vault - Grounded RAG"
 APP_VERSION = "1.0.0"
@@ -51,6 +67,7 @@ class RAGApp(ctk.CTk):
         self.title(f"{APP_TITLE} v{APP_VERSION}")
         self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.minsize(800, 600)
+        self.configure(fg_color=COLORS["bg_light"])
         
         # State
         self.kb: Optional[DocumentIngestion] = None
@@ -61,6 +78,7 @@ class RAGApp(ctk.CTk):
         # Build UI
         self._create_widgets()
         self._create_layout()
+        self._configure_chat_tags()
         
         # Initialize in background
         self.after(100, self._initialize_async)
@@ -72,43 +90,47 @@ class RAGApp(ctk.CTk):
         """Create all UI widgets."""
         
         # ===== Header Frame =====
-        self.header_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.header_frame = ctk.CTkFrame(self, corner_radius=0, fg_color=COLORS["bg_card"])
         
         self.title_label = ctk.CTkLabel(
             self.header_frame,
             text="📚 Memory Vault",
-            font=ctk.CTkFont(size=28, weight="bold")
+            font=ctk.CTkFont(size=28, weight="bold"),
+            text_color=COLORS["primary"]
         )
         
         self.subtitle_label = ctk.CTkLabel(
             self.header_frame,
             text="Grounded RAG with Citation Enforcement",
             font=ctk.CTkFont(size=14),
-            text_color="gray"
+            text_color=COLORS["text_secondary"]
         )
         
         # ===== Status Frame =====
-        self.status_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.status_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=COLORS["bg_card"], border_width=1, border_color=COLORS["border"])
         
         self.status_label = ctk.CTkLabel(
             self.status_frame,
             text="⏳ Initializing...",
             font=ctk.CTkFont(size=12),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["text_primary"]
         )
         
         self.model_label = ctk.CTkLabel(
             self.status_frame,
             text="Model: -",
             font=ctk.CTkFont(size=12),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["text_primary"]
         )
         
         self.chunks_label = ctk.CTkLabel(
             self.status_frame,
             text="Chunks: -",
             font=ctk.CTkFont(size=12),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["text_primary"]
         )
         
         self.datadir_label = ctk.CTkLabel(
@@ -116,7 +138,7 @@ class RAGApp(ctk.CTk):
             text="📁 Data: -",
             font=ctk.CTkFont(size=11),
             anchor="w",
-            text_color="gray"
+            text_color=COLORS["text_secondary"]
         )
         
         self.dbpath_label = ctk.CTkLabel(
@@ -124,17 +146,18 @@ class RAGApp(ctk.CTk):
             text="🗄️ DB: -",
             font=ctk.CTkFont(size=11),
             anchor="w",
-            text_color="gray"
+            text_color=COLORS["text_secondary"]
         )
         
         # ===== Config Frame =====
-        self.config_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.config_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=COLORS["bg_card"], border_width=1, border_color=COLORS["border"])
         
         self.config_title = ctk.CTkLabel(
             self.config_frame,
             text="⚙️ Configuration",
             font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["text_primary"]
         )
         
         self.toc_filter_var = ctk.BooleanVar(value=RAG_FILTER_TOC)
@@ -162,30 +185,36 @@ class RAGApp(ctk.CTk):
         self.content_frame = ctk.CTkFrame(self, corner_radius=10, fg_color="transparent")
         
         # Chat history
-        self.chat_frame = ctk.CTkFrame(self.content_frame, corner_radius=10)
+        self.chat_frame = ctk.CTkFrame(self.content_frame, corner_radius=10, fg_color=COLORS["bg_card"], border_width=1, border_color=COLORS["border"])
         
         self.chat_label = ctk.CTkLabel(
             self.chat_frame,
             text="💬 Conversation",
             font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["primary"]
         )
         
         self.chat_textbox = ctk.CTkTextbox(
             self.chat_frame,
             font=ctk.CTkFont(size=13),
             wrap="word",
-            state="disabled"
+            state="disabled",
+            fg_color="white",
+            text_color=COLORS["text_primary"],
+            border_width=1,
+            border_color=COLORS["border"]
         )
         
         # Sources panel
-        self.sources_frame = ctk.CTkFrame(self.content_frame, corner_radius=10)
+        self.sources_frame = ctk.CTkFrame(self.content_frame, corner_radius=10, fg_color=COLORS["bg_card"], border_width=1, border_color=COLORS["border"])
         
         self.sources_label = ctk.CTkLabel(
             self.sources_frame,
             text="📎 Sources & Citations",
             font=ctk.CTkFont(size=14, weight="bold"),
-            anchor="w"
+            anchor="w",
+            text_color=COLORS["secondary"]
         )
         
         self.sources_textbox = ctk.CTkTextbox(
@@ -193,17 +222,25 @@ class RAGApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             wrap="word",
             state="disabled",
-            width=350
+            width=350,
+            fg_color="#f9fafb",
+            text_color=COLORS["text_primary"],
+            border_width=1,
+            border_color=COLORS["border"]
         )
         
         # ===== Input Frame =====
-        self.input_frame = ctk.CTkFrame(self, corner_radius=10)
+        self.input_frame = ctk.CTkFrame(self, corner_radius=10, fg_color=COLORS["bg_card"], border_width=1, border_color=COLORS["border"])
         
         self.question_entry = ctk.CTkTextbox(
             self.input_frame,
             font=ctk.CTkFont(size=14),
             height=80,
-            wrap="word"
+            wrap="word",
+            fg_color="white",
+            text_color=COLORS["text_primary"],
+            border_width=2,
+            border_color=COLORS["primary"]
         )
         self.question_entry.bind("<Control-Return>", self._on_submit)
         self.question_entry.bind("<Shift-Return>", lambda e: None)  # Allow shift+enter for newline
@@ -213,7 +250,9 @@ class RAGApp(ctk.CTk):
             text="🔍 Ask Question",
             font=ctk.CTkFont(size=14, weight="bold"),
             height=40,
-            command=self._on_submit
+            command=self._on_submit,
+            fg_color=COLORS["primary"],
+            hover_color=COLORS["primary_hover"]
         )
         
         self.clear_button = ctk.CTkButton(
@@ -222,15 +261,16 @@ class RAGApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             height=40,
             width=80,
-            fg_color="gray",
+            fg_color=COLORS["text_secondary"],
+            hover_color=COLORS["text_primary"],
             command=self._clear_chat
         )
         
         self.hint_label = ctk.CTkLabel(
             self.input_frame,
-            text="Press Ctrl+Enter to submit",
+            text="Press Ctrl+Enter to submit • Shift+Enter for new line",
             font=ctk.CTkFont(size=11),
-            text_color="gray"
+            text_color=COLORS["text_secondary"]
         )
         
         # ===== Progress =====
@@ -446,32 +486,53 @@ class RAGApp(ctk.CTk):
         self.progress_bar.grid_remove()
     
     def _append_to_chat(self, text: str, tag: str = "normal"):
-        """Append text to chat history."""
+        """Append text to chat history with optional color tag."""
         self.chat_textbox.configure(state="normal")
-        self.chat_textbox.insert("end", text + "\n\n")
+        self.chat_textbox.insert("end", text + "\n\n", tag)
         self.chat_textbox.configure(state="disabled")
         self.chat_textbox.see("end")
+    
+    def _configure_chat_tags(self):
+        """Configure color tags for chat messages."""
+        self.chat_textbox.tag_config("system", foreground=COLORS["secondary"])
+        self.chat_textbox.tag_config("question", foreground=COLORS["primary"], font=ctk.CTkFont(size=13, weight="bold"))
+        self.chat_textbox.tag_config("answer", foreground=COLORS["text_primary"])
+        self.chat_textbox.tag_config("citations", foreground=COLORS["success"], font=ctk.CTkFont(size=11))
+        self.chat_textbox.tag_config("error", foreground=COLORS["danger"], font=ctk.CTkFont(size=13))
     
     def _append_system_message(self, message: str):
         """Add a system message."""
         timestamp = datetime.now().strftime("%H:%M")
-        self._append_to_chat(f"ℹ️ [{timestamp}] {message}")
+        self._append_to_chat(f"ℹ️ [{timestamp}] {message}", "system")
     
     def _append_question(self, question: str):
         """Add user question to chat."""
         timestamp = datetime.now().strftime("%H:%M")
-        self._append_to_chat(f"👤 [{timestamp}] {question}")
+        self.chat_textbox.configure(state="normal")
+        self.chat_textbox.insert("end", "\n" + "─" * 60 + "\n")
+        self.chat_textbox.insert("end", f"👤 [{timestamp}] ", "system")
+        self.chat_textbox.insert("end", f"{question}\n\n", "question")
+        self.chat_textbox.configure(state="disabled")
+        self.chat_textbox.see("end")
     
     def _append_answer(self, answer: str, citations: Set[str]):
         """Add validated answer to chat."""
         timestamp = datetime.now().strftime("%H:%M")
-        citation_text = f"\n📎 Citations: {', '.join(sorted(citations))}" if citations else ""
-        self._append_to_chat(f"✅ [{timestamp}] {answer}{citation_text}")
+        self.chat_textbox.configure(state="normal")
+        self.chat_textbox.insert("end", f"✅ [{timestamp}] ", "system")
+        self.chat_textbox.insert("end", f"{answer}\n", "answer")
+        if citations:
+            citation_count = len(citations)
+            self.chat_textbox.insert("end", f"\n📎 {citation_count} citation{'s' if citation_count != 1 else ''} validated\n\n", "citations")
+        else:
+            self.chat_textbox.insert("end", "\n\n")
+        self.chat_textbox.configure(state="disabled")
+        self.chat_textbox.see("end")
     
     def _append_error(self, error: str):
         """Add error message to chat."""
         timestamp = datetime.now().strftime("%H:%M")
-        self._append_to_chat(f"❌ [{timestamp}] {error}")
+        self._append_to_chat(f"❌ [{timestamp}] {error}", "error")
     
     def _update_sources(self, data: Tuple[List[Dict], dict]):
         """Update the sources panel."""

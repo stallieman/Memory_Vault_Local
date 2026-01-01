@@ -7,7 +7,7 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from local_rag_ollama import validate_answer, CitationValidationError
+from local_rag_ollama import validate_answer, CitationValidationError  # type: ignore
 
 def test_lenient_mode():
     """Test that lenient mode allows some uncited blocks"""
